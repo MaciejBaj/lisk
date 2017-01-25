@@ -68,6 +68,20 @@ module.exports = function (grunt) {
 			},
 			build: {
 				command: 'cd ' + version_dir + '/ && touch build && echo "v' + today + '" > build'
+			},
+			coverage: {
+				command: 'node_modules/.bin/istanbul cover node_modules/.bin/_mocha',
+				maxBuffer: require('buffer').kMaxLength - 1
+			},
+			coverallsFunc: {
+				command: [
+					'rm -rf ./coverage-func || curl -o coverage-func.zip http://localhost:4001/coverage/download',
+					'unzip ./coverage-func.zip -d coverage-func',
+					'cat coverage-func/lcov.info | node_modules/coveralls/bin/coveralls.js'
+				].join(' && ')
+			},
+			coverallsUnit: {
+				command: 'cat coverage/lcov.info | node_modules/coveralls/bin/coveralls.js'
 			}
 		},
 
@@ -140,5 +154,5 @@ module.exports = function (grunt) {
 
 	grunt.registerTask('default', ['release']);
 	grunt.registerTask('release', ['exec:folder', 'obfuscator', 'exec:package', 'exec:build', 'compress']);
-	grunt.registerTask('travis', ['jshint', 'mochaTest']);
+	grunt.registerTask('travis', ['jshint', 'exec:coverage']);
 };

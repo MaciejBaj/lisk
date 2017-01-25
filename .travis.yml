@@ -1,7 +1,7 @@
 dist: 'trusty'
 language: node_js
 node_js:
-  - '0.12.17'
+  - '6.9.4'
 services:
   - postgresql
 addons:
@@ -13,4 +13,6 @@ before_script:
   - tar -zxvf lisk-node-Linux-x86_64.tar.gz
   - cd test/lisk-js/; npm install; cd ../..
   - cp test/config.json test/genesisBlock.json .
-  - node app.js &> /dev/null &
+  - node app.js  --coverage=true &> /dev/null &
+"after_success":
+  - npm run coveralls:func
