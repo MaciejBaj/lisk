@@ -1,1 +1,3 @@
---timeout 250s
+--no-timeouts
+--reporter spec
+--retries 2
