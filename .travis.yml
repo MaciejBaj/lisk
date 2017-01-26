@@ -16,11 +16,8 @@ before_install:
 before_script:
   - node app.js --coverage=true &> /dev/null &
 env:
-  - HOST=http://localhost:4000
   - TESTNAME=test/api/accounts.js
-  - TESTNAME=test/api/delegates.js
   - TESTNAME=test/api/peer.js
   - TESTNAME=test/unit/helpers/request-limiter.js
-script: "npm test"
 after_success:
   - npm run coveralls:func
