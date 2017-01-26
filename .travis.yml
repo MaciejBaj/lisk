@@ -17,6 +17,8 @@ before_script:
   - cp test/config.json test/genesisBlock.json .
   - node app.js --coverage=true &> /dev/null &
   - mkdir test/.coverage-func
+  - curl -o ./test/.coverage-func.zip https://localhost:4000/coverage/download
+  - ls -a ./test
 env:
   - TESTNAME=test/api/accounts.js
   - TESTNAME=test/api/peer.js
