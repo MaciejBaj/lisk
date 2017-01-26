@@ -161,5 +161,5 @@ module.exports = function (grunt) {
 
 	grunt.registerTask('default', ['release']);
 	grunt.registerTask('release', ['exec:folder', 'obfuscator', 'exec:package', 'exec:build', 'compress']);
-	grunt.registerTask('travis', ['jshint', 'exec:coverageSingle', 'exec:coverallsFunc']);
+	grunt.registerTask('travis', ['jshint', 'exec:coverageSingle']);
 };

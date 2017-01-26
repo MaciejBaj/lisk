@@ -16,16 +16,12 @@ before_script:
   - cd test/lisk-js/; npm install; cd ../..
   - cp test/config.json test/genesisBlock.json .
   - node app.js --coverage=true &> /dev/null &
-  - mkdir test/.coverage-func
-  - curl -o ./test/.coverage-func.zip http://localhost:4000/coverage/download
-  - ls -a ./test
+  - ps -xa | grep node
 env:
   - TESTNAME=test/api/accounts.js
   - TESTNAME=test/api/peer.js
   - TESTNAME=test/unit/helpers/request-limiter.js
 after_success:
-  - mkdir test/.coverage-func
-  - npm run coveralls:func
+  - ps -xa | grep node
 after_failure:
-  - curl -o ./test/.coverage-func.zip http://localhost:4000/coverage/download
-  - ls -a ./test
+  - ps -xa | grep node
