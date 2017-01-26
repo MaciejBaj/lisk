@@ -22,7 +22,7 @@ module.exports = function (grunt) {
 	    version_dir = release_dir + config.version;
 
 	var maxBufferSize = 2147483646;
-	var HOST = 'http://localhost:4000';
+	var HOST = 'http://0.0.0.0:4000';
 
 	grunt.initConfig({
 		obfuscator: {
@@ -82,7 +82,7 @@ module.exports = function (grunt) {
 			},
 			coverallsFunc: {
 				command: [
-					'rm -rf ./test/.coverage-func || curl -o ./test/.coverage-func.zip ' + HOST + '/coverage/download',
+					'rm -rf ./test/.coverage-func && curl -o ./test/.coverage-func.zip ' + HOST + '/coverage/download',
 					'unzip ./test/.coverage-func.zip -d ./test/.coverage-func',
 					'cat ./test/.coverage-func/lcov.info | node_modules/coveralls/bin/coveralls.js'
 				].join(' && ')
