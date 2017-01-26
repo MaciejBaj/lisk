@@ -81,7 +81,7 @@ module.exports = function (grunt) {
 			},
 			coverallsFunc: {
 				command: [
-					'rm -rf ./test/.coverage-func || curl -o ./test/.coverage-func.zip http://localhost:4001/coverage/download',
+					'rm -rf ./test/.coverage-func || curl -o ./test/.coverage-func.zip $HOST/coverage/download',
 					'unzip ./test/.coverage-func.zip -d ./test/.coverage-func',
 					'cat ./test/.coverage-func/lcov.info | node_modules/coveralls/bin/coveralls.js'
 				].join(' && ')

@@ -6,15 +6,17 @@ services:
   - postgresql
 addons:
   postgresql: '9.6'
-before_script:
+before_install:
   - createdb lisk_test
   - psql -d lisk_test -c "alter user "$USER" with password 'password';"
   - wget https://downloads.lisk.io/lisk-node/lisk-node-Linux-x86_64.tar.gz
   - tar -zxvf lisk-node-Linux-x86_64.tar.gz
   - cd test/lisk-js/; npm install; cd ../..
   - cp test/config.json test/genesisBlock.json .
-  - node app.js  --coverage=true &> /dev/null &
+before_script:
+  - node app.js --coverage=true &> /dev/null &
 env:
+  - HOST=http://localhost:4000
   - TESTNAME=test/api/accounts.js
   - TESTNAME=test/api/delegates.js
   - TESTNAME=test/api/peer.js
