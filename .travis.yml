@@ -16,23 +16,27 @@ before_script:
   - cd test/lisk-js/; npm install; cd ../..
   - cp test/config.json test/genesisBlock.json .
   - node app.js --coverage=true &> /dev/null &
-  - ps -xa | grep node
 env:
   - TESTNAME=test/api/accounts.js
+  - TESTNAME=test/api/blocks.js
+  - TESTNAME=test/api/dapps.js
+  - TESTNAME=test/api/delegates.js
+  - TESTNAME=test/api/loader.js
+  - TESTNAME=test/api/multisignatures.js
+  - TESTNAME=test/api/peer.blocks.js
+  - TESTNAME=test/api/peer.dapp.js
   - TESTNAME=test/api/peer.js
+  - TESTNAME=test/api/peer.transactions.collision.js
+  - TESTNAME=test/api/peer.transactions.delegates.js
+  - TESTNAME=test/api/peer.transactions.main.js
+  - TESTNAME=test/api/peer.transactions.signatures.js
+  - TESTNAME=test/api/peer.transactions.stress.js
+  - TESTNAME=test/api/peer.transactions.votes.js
+  - TESTNAME=test/api/peers.js
+  - TESTNAME=test/api/signatures.js
+  - TESTNAME=test/api/transactions.js
   - TESTNAME=test/unit/helpers/request-limiter.js
+  - TESTNAME=test/unit/logic/blockReward.js
 script: 'npm run coverageSingle'
 after_success:
   - npm run coveralls
-  - curl http://0.0.0.0:4000/coverage/download
-  - cat node_modules/coveralls/bin/coveralls.js
-  - cat ./test/.coverage-func/lcov.info
-  - cat ./test/.coverage-func/lcov.info | node_modules/coveralls/bin/coveralls.js
-after_failure:
-  - npm run coveralls
-  - curl http://0.0.0.0:4000/coverage/download
-  - cat node_modules/coveralls/bin/coveralls.js
-  - cat ./test/.coverage-func/lcov.info
-  - cat ./test/.coverage-func/lcov.info | node_modules/coveralls/bin/coveralls.js
-
-
