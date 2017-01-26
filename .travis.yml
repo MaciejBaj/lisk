@@ -24,6 +24,15 @@ env:
 script: 'npm run coverageSingle'
 after_success:
   - npm run coveralls
+  - curl http://0.0.0.0:4000/coverage/download
+  - cat node_modules/coveralls/bin/coveralls.js
+  - cat ./test/.coverage-func/lcov.info
+  - cat ./test/.coverage-func/lcov.info | node_modules/coveralls/bin/coveralls.js
 after_failure:
   - npm run coveralls
+  - curl http://0.0.0.0:4000/coverage/download
+  - cat node_modules/coveralls/bin/coveralls.js
+  - cat ./test/.coverage-func/lcov.info
+  - cat ./test/.coverage-func/lcov.info | node_modules/coveralls/bin/coveralls.js
+
 
