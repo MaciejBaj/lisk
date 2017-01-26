@@ -14,5 +14,11 @@ before_script:
   - cd test/lisk-js/; npm install; cd ../..
   - cp test/config.json test/genesisBlock.json .
   - node app.js  --coverage=true &> /dev/null &
-"after_success":
+env:
+  - TESTNAME=test/api/accounts.js
+  - TESTNAME=test/api/delegates.js
+  - TESTNAME=test/api/peer.js
+  - TESTNAME=test/unit/helpers/request-limiter.js
+script: "npm test"
+after_success:
   - npm run coveralls:func

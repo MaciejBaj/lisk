@@ -72,7 +72,11 @@ module.exports = function (grunt) {
 				command: 'cd ' + version_dir + '/ && touch build && echo "v' + today + '" > build'
 			},
 			coverage: {
-				command: 'node_modules/.bin/istanbul cover node_modules/.bin/_mocha',
+				command: 'node_modules/.bin/istanbul cover ./node_modules/.bin/mocha',
+				maxBuffer: maxBufferSize
+			},
+			coverageSingle: {
+				command: 'node_modules/.bin/istanbul cover ./node_modules/.bin/mocha $TESTNAME',
 				maxBuffer: maxBufferSize
 			},
 			coverallsFunc: {
@@ -156,5 +160,5 @@ module.exports = function (grunt) {
 
 	grunt.registerTask('default', ['release']);
 	grunt.registerTask('release', ['exec:folder', 'obfuscator', 'exec:package', 'exec:build', 'compress']);
-	grunt.registerTask('travis', ['jshint', 'exec:coverage', 'exec:coverallsFunc']);
+	grunt.registerTask('travis', ['jshint', 'exec:coverageSingle', 'exec:coverallsFunc']);
 };
