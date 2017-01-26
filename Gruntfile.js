@@ -21,6 +21,8 @@ module.exports = function (grunt) {
 	var release_dir = __dirname + '/release/',
 	    version_dir = release_dir + config.version;
 
+	var maxBufferSize = 2147483646;
+
 	grunt.initConfig({
 		obfuscator: {
 			files: files,
@@ -71,13 +73,13 @@ module.exports = function (grunt) {
 			},
 			coverage: {
 				command: 'node_modules/.bin/istanbul cover node_modules/.bin/_mocha',
-				maxBuffer: require('buffer').kMaxLength - 1
+				maxBuffer: maxBufferSize
 			},
 			coverallsFunc: {
 				command: [
-					'rm -rf ./coverage-func || curl -o coverage-func.zip http://localhost:4001/coverage/download',
-					'unzip ./coverage-func.zip -d coverage-func',
-					'cat coverage-func/lcov.info | node_modules/coveralls/bin/coveralls.js'
+					'rm -rf ./test/.coverage-func || curl -o ./test/.coverage-func.zip http://localhost:4001/coverage/download',
+					'unzip ./test/.coverage-func.zip -d ./test/.coverage-func',
+					'cat ./test/.coverage-func/lcov.info | node_modules/coveralls/bin/coveralls.js'
 				].join(' && ')
 			},
 			coverallsUnit: {
@@ -154,5 +156,5 @@ module.exports = function (grunt) {
 
 	grunt.registerTask('default', ['release']);
 	grunt.registerTask('release', ['exec:folder', 'obfuscator', 'exec:package', 'exec:build', 'compress']);
-	grunt.registerTask('travis', ['jshint', 'exec:coverage']);
+	grunt.registerTask('travis', ['jshint', 'exec:coverage', 'exec:coverallsFunc']);
 };
