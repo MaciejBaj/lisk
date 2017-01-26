@@ -5,8 +5,8 @@
   "scripts": {
     "start": "node app.js",
     "test": "./node_modules/.bin/grunt travis --verbose",
-    "coverageSingle": "./node_modules/.bin/grunt coverageSingle --verbose",
-    "coveralls": "./node_modules/.bin/grunt coverallsFunc --verbose"
+    "coverageSingle": "./node_modules/.bin/grunt exec:coverageSingle --verbose",
+    "coveralls": "./node_modules/.bin/grunt exec:coverallsFunc --verbose"
   },
   "author": "Boris Povod <boris@crypti.me>, Pavel Nekrasov <landgraf.paul@gmail.com>, Oliver Beddows <oliver@lisk.io>",
   "dependencies": {
