@@ -6,6 +6,8 @@ services:
   - postgresql
 addons:
   postgresql: '9.6'
+before_install:
+  - sudo apt-get install -y lsof
 before_script:
   - createdb lisk_test
   - psql -d lisk_test -c "alter user "$USER" with password 'password';"
@@ -19,4 +21,6 @@ env:
   - TESTNAME=test/api/peer.js
   - TESTNAME=test/unit/helpers/request-limiter.js
 after_success:
+  - mkdir test/.coverage-func
+  - lsof -i :4000
   - npm run coveralls:func
