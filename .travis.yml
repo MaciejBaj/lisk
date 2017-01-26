@@ -16,11 +16,14 @@ before_script:
   - cd test/lisk-js/; npm install; cd ../..
   - cp test/config.json test/genesisBlock.json .
   - node app.js --coverage=true &> /dev/null &
+  - lsof -i :4000
+  - mkdir test/.coverage-func
 env:
   - TESTNAME=test/api/accounts.js
   - TESTNAME=test/api/peer.js
   - TESTNAME=test/unit/helpers/request-limiter.js
 after_success:
   - mkdir test/.coverage-func
-  - lsof -i :4000
   - npm run coveralls:func
+after_failure:
+  - lsof -i :4000
