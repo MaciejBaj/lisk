@@ -17,8 +17,16 @@ before_script:
   - cp test/config.json test/genesisBlock.json .
   - node app.js --coverage=true &> /dev/null &
 env:
-  - TESTNAME=test/api
-  - TESTNAME=test/unit
+  global:
+    - HOST=http://0.0.0.0:4000
+  matrix:
+    - TESTNAME=test/api COVERAGE_REPORT=true
+    - TESTNAME=test/unit/helpers COVERAGE_REPORT=false
+    - TESTNAME=test/unit/logic COVERAGE_REPORT=false
 script: 'npm run coverageSingle'
 after_success:
-  - npm run coveralls
+    - 'if [ ${COVERAGE_REPORT} = "true" ]; then
+         npm run coveralls:func
+      else
+         echo "Success, writing no coverage report."
+      fi'
