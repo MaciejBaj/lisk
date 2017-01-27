@@ -20,7 +20,7 @@ env:
   global:
     - HOST=http://0.0.0.0:4000
   matrix:
-    - TESTNAME=test/api COVERAGE_REPORT=true
+    - TESTNAME=test/api/accounts.js COVERAGE_REPORT=true
     - TESTNAME=test/unit/helpers COVERAGE_REPORT=false
     - TESTNAME=test/unit/logic COVERAGE_REPORT=false
 script: 'npm run coverageSingle'
