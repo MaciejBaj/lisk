@@ -26,7 +26,7 @@ env:
 script: 'npm run coverageSingle'
 after_success:
     - 'if [ ${COVERAGE_REPORT} = "true" ]; then
-         npm run coveralls:func
+         npm run coveralls:func;
       else
-         echo "Success, writing no coverage report."
+         echo "Success, writing no coverage report.";
       fi'
