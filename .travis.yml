@@ -40,3 +40,4 @@ after_success:
 after_failure:
   - bash .travis/report-failure.sh $TRAVIS_BUILD_NUMBER
   - cat .app.log
+
