@@ -41,6 +41,6 @@ COVERALLS_SERVICE_JOB_ID=JOB_NUMBER
 echo unzip from ${COVERAGE_DIR}/${ZIP_REPORT_NAME} to ${COVERAGE_DIR}/.coverage
 
 unzip ${COVERAGE_DIR}/${ZIP_REPORT_NAME} -d ${COVERAGE_DIR}/.coverage
-cat ${COVERAGE_DIR}/.coverage/lcov.info | ../node_modules/coveralls/bin/coveralls.js
+cat ${COVERAGE_DIR}/.coverage/lcov.info | ${TRAVIS_BUILD_DIR}/node_modules/.bin/coveralls.js
 
 echo ${COVERAGE_DIR}/.coverage/lcov.info "SEND TO COVERALLS"
