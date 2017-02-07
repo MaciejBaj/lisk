@@ -24,7 +24,7 @@ if [ ! -e ${COVERAGE_DIR}/${ZIP_REPORT_NAME} ]; then
   exit 1
 fi
 
-if [ -n ${TRAVIS_PULL_REQUEST_BRANCH+x} ] && [ ${TRAVIS_PULL_REQUEST_BRANCH} != "" ]; then
+if [ -n ${TRAVIS_PULL_REQUEST_BRANCH+x} ] && [ ! ${TRAVIS_PULL_REQUEST_BRANCH} -eq "" ]; then
     BRANCH=${TRAVIS_PULL_REQUEST_BRANCH}
 else
     BRANCH=${TRAVIS_BRANCH}
@@ -41,6 +41,9 @@ COVERALLS_SERVICE_JOB_ID=JOB_NUMBER
 echo unzip from ${COVERAGE_DIR}/${ZIP_REPORT_NAME} to ${COVERAGE_DIR}/.coverage
 
 unzip ${COVERAGE_DIR}/${ZIP_REPORT_NAME} -d ${COVERAGE_DIR}/.coverage
-cat ${COVERAGE_DIR}/.coverage/lcov.info | ${TRAVIS_BUILD_DIR}/node_modules/.bin/coveralls.js
+ls  ${TRAVIS_BUILD_DIR}/node_modules
+ls ${TRAVIS_BUILD_DIR}/node_modules/coveralls
+ls ${TRAVIS_BUILD_DIR}/node_module/.bin
+cat ${COVERAGE_DIR}/.coverage/lcov.info | ${TRAVIS_BUILD_DIR}/node_modules/coveralls/bin/coveralls.js
 
 echo ${COVERAGE_DIR}/.coverage/lcov.info "SEND TO COVERALLS"
