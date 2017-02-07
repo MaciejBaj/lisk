@@ -13,18 +13,18 @@ echo ${TRAVIS_BUILD_NUMBER} ${JOB_NUMBER} ${TEST_TYPE} ${TRAVIS_BUILD_DIR} ${TRA
 COVERAGE_DIR=${TRAVIS_BUILD_DIR}/test
 
 if [ ${TEST_TYPE} == "FUNC" ]; then
-  ZIP_REPORT_NAME=".coverage-func.zip";
+  REPORT_NAME=".coverage-func";
+  unzip ${COVERAGE_DIR}/.coverage-func.zip -d ${COVERAGE_DIR}/${REPORT_NAME}
 else
-  ZIP_REPORT_NAME=".coverage-unit.zip";
-  (cd ${COVERAGE_DIR} && zip -r .coverage-unit) > ${COVERAGE_DIR}/${ZIP_REPORT_NAME}
+  REPORT_NAME=".coverage-unit";
 fi
 
-if [ ! -e ${COVERAGE_DIR}/${ZIP_REPORT_NAME} ]; then
-  echo "Cannot find the report at path $COVERAGE_DIR/$ZIP_REPORT_NAME";
+if [ ! -e ${COVERAGE_DIR}/${REPORT_NAME} ]; then
+  echo "Cannot find the report at path $COVERAGE_DIR/$REPORT_NAME";
   exit 1
 fi
 
-if [ -n ${TRAVIS_PULL_REQUEST_BRANCH+x} ] && [ ! ${TRAVIS_PULL_REQUEST_BRANCH} -eq "" ]; then
+if [ -n ${TRAVIS_PULL_REQUEST_BRANCH+x} ] && [ -n ${TRAVIS_PULL_REQUEST_BRANCH} ]; then
     BRANCH=${TRAVIS_PULL_REQUEST_BRANCH}
 else
     BRANCH=${TRAVIS_BRANCH}
@@ -38,12 +38,11 @@ COVERALLS_REPO_TOKEN=7s05KDqmPWkwZ6nzU5WtznKkt5FKDE3kv
 COVERALLS_PARALLEL=true
 COVERALLS_SERVICE_JOB_ID=JOB_NUMBER
 
-echo unzip from ${COVERAGE_DIR}/${ZIP_REPORT_NAME} to ${COVERAGE_DIR}/.coverage
-
-unzip ${COVERAGE_DIR}/${ZIP_REPORT_NAME} -d ${COVERAGE_DIR}/.coverage
-ls  ${TRAVIS_BUILD_DIR}/node_modules
+ls ${COVERAGE_DIR}/${REPORT_NAME}
 ls ${TRAVIS_BUILD_DIR}/node_modules/coveralls
-ls ${TRAVIS_BUILD_DIR}/node_module/.bin
-cat ${COVERAGE_DIR}/.coverage/lcov.info | ${TRAVIS_BUILD_DIR}/node_modules/coveralls/bin/coveralls.js
+ls ${TRAVIS_BUILD_DIR}/node_modules/coveralls/bin
 
-echo ${COVERAGE_DIR}/.coverage/lcov.info "SEND TO COVERALLS"
+yarn global add coveralls
+cat ${COVERAGE_DIR}/${REPORT_NAME}/lcov.info | coveralls
+
+echo ${COVERAGE_DIR}/${REPORT_NAME}/lcov.info "SEND TO COVERALLS"
