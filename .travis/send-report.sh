@@ -19,7 +19,7 @@ else
   REPORT_NAME=".coverage-unit";
 fi
 
-if [ ! -e ${COVERAGE_DIR}/${REPORT_NAME} ]; then
+if [ ! -e ${COVERAGE_DIR}/${REPORT_NAME}/lcov.info ]; then
   echo "Cannot find the report at path $COVERAGE_DIR/$REPORT_NAME";
   exit 1
 fi
@@ -30,19 +30,15 @@ else
     BRANCH=${TRAVIS_BRANCH}
 fi
 
-#mv ${COVERAGE_DIR}/${ZIP_REPORT_NAME} ${TRAVIS_BUILD_DIR}/.travis
-#REPORT_NAME=BRANCH-${BRANCH}-BUILD-${TRAVIS_BUILD_NUMBER}-JOB-${JOB_NUMBER}-OF-${TESTS_COUNT}.zip
-#mv ${TRAVIS_BUILD_DIR}/.travis/${ZIP_REPORT_NAME} ${TRAVIS_BUILD_DIR}/.travis/${REPORT_NAME}
 COVERALLS_SERVICE_NAME="travis-ci"
 COVERALLS_REPO_TOKEN=7s05KDqmPWkwZ6nzU5WtznKkt5FKDE3kv
 COVERALLS_PARALLEL=true
 COVERALLS_SERVICE_JOB_ID=JOB_NUMBER
 
-ls ${COVERAGE_DIR}/${REPORT_NAME}
-ls ${TRAVIS_BUILD_DIR}/node_modules/coveralls
-ls ${TRAVIS_BUILD_DIR}/node_modules/coveralls/bin
-
 yarn global add coveralls
 cat ${COVERAGE_DIR}/${REPORT_NAME}/lcov.info | coveralls
-
-echo ${COVERAGE_DIR}/${REPORT_NAME}/lcov.info "SEND TO COVERALLS"
+if [ -z $? ]; then
+    echo ${COVERAGE_DIR}/${REPORT_NAME}/lcov.info "SEND TO COVERALLS"
+else
+    echo "Unable to create reports: " $?
+fi

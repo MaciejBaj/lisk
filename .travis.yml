@@ -31,8 +31,8 @@ env:
     - COVERALLS_PARALLEL=true
   matrix:
     - TEST=test/api/loader.js TEST_TYPE='FUNC'
+    - TEST=test/api/peer.js TEST_TYPE='FUNC'
     - TEST=test/unit/helpers TEST_TYPE='UNIT'
-    - TEST=test/unit/logic TEST_TYPE='UNIT'
     - TEST=test/unit/modules TEST_TYPE='UNIT'
 script: 'npm run travis'
 after_success:
