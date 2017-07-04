@@ -143,7 +143,7 @@ Block.prototype.create = function (data) {
 Block.prototype.sign = function (block, keypair) {
 	var hash = this.getHash(block);
 
-	return this.scope.ed.sign(hash, keypair).toString('hex');
+	return this.scope.ed.sign(hash, keypair.privateKey).toString('hex');
 };
 
 /**
@@ -228,9 +228,7 @@ Block.prototype.verifySignature = function (block) {
 			data2[i] = data[i];
 		}
 		var hash = crypto.createHash('sha256').update(data2).digest();
-		var blockSignatureBuffer = Buffer.from(block.blockSignature, 'hex');
-		var generatorPublicKeyBuffer = Buffer.from(block.generatorPublicKey, 'hex');
-		res = this.scope.ed.verify(hash, blockSignatureBuffer || ' ', generatorPublicKeyBuffer || ' ');
+		res = this.scope.ed.verify(hash, block.blockSignature, block.generatorPublicKey);
 	} catch (e) {
 		throw e;
 	}

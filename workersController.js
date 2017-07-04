@@ -8,6 +8,8 @@ var SlaveWAMPServer = require('wamp-socket-cluster/SlaveWAMPServer');
 var Peer = require('./logic/peer');
 var System = require('./modules/system');
 var Handshake = require('./helpers/wsApi').middleware.Handshake;
+var ed = require('./helpers/ed');
+var constants = require('./helpers/constants');
 var extractHeaders = require('./helpers/wsApi').extractHeaders;
 
 /**
@@ -22,6 +24,12 @@ module.exports.run = function (worker) {
 		slaveWAMPServer: function (cb) {
 			new SlaveWAMPServer(worker, cb);
 		},
+
+		connectionPrivateKey: ['slaveWAMPServer', function (scope, cb) {
+			console.log('connection in woekrs controller', Buffer.from(scope.slaveWAMPServer.config.connectionPrivateKey));
+			cb(null, Buffer.from(scope.slaveWAMPServer.config.connectionPrivateKey, 'hex'))
+		}],
+
 		config: ['slaveWAMPServer', function (scope, cb) {
 			cb(null, scope.slaveWAMPServer.config);
 		}],
@@ -35,14 +43,30 @@ module.exports.run = function (worker) {
 
 			scServer.addMiddleware(scServer.MIDDLEWARE_HANDSHAKE, function (req, next) {
 
+
+				console.log('\x1b[35m%s\x1b[0m', "HANDSHAKE START");
+
 				try {
 					var headers = extractHeaders(req);
 				} catch (invalidHeadersException) {
 					return next(invalidHeadersException);
 				}
 
+				console.log('\x1b[35m%s\x1b[0m', "HANDSHAKE START with ", headers.port);
+
 				handshake(headers, function (err, peer) {
-					scope.slaveWAMPServer.sendToMaster(err ? 'removePeer' : 'acceptPeer', peer, req.remoteAddress, function (onMasterError) {
+					var peerBuffer = Buffer.from(JSON.stringify(peer));
+
+					console.log('HANDSHAKE connectionPrivateKey length ', scope.connectionPrivateKey.length, peerBuffer.length);
+					if (peerBuffer.length === 0) {
+						console.log('HANDSHAKE ---  peerBuffer eq 0 - peeer: ', peer);
+					}
+					var paylaod = {
+						peer: peer,
+						signature: ed.sign(peerBuffer, scope.connectionPrivateKey).toString('hex')
+					};
+					scope.slaveWAMPServer.sendToMaster(err ? 'removePeer' : 'acceptPeer', paylaod, req.remoteAddress, function (onMasterError) {
+						console.log('\x1b[35m%s\x1b[0m', "HANDSHAKE START with ", headers.port, 'RESULT ERROR   : ', onMasterError);
 						next(err || onMasterError);
 					});
 				});
@@ -62,7 +86,21 @@ module.exports.run = function (worker) {
 					//ToDO: do some unable to disconnect peer logging
 					return;
 				}
-				return scope.slaveWAMPServer.sendToMaster('removePeer',  new Peer(headers), socket.request.remoteAddress, function (err, peer) {
+				var peer = new Peer(headers);
+				var peerBuffer = Buffer.from(JSON.stringify(peer));
+
+				console.log('CONNECTION DISCONNECTED connectionPrivateKey length', scope.connectionPrivateKey.length, peerBuffer.length);
+
+				if (peerBuffer.length === 0) {
+					console.log('CONNECTION DISCONNECTED  ---  peerBuffer eq 0 - peeer: ', peer);
+				}
+
+				var paylaod = {
+					peer: peer,
+					signature: ed.sign(peerBuffer, scope.connectionPrivateKey).toString('hex')
+				};
+
+				return scope.slaveWAMPServer.sendToMaster('removePeer', paylaod, socket.request.remoteAddress, function (err, peer) {
 					if (err) {
 						//ToDo: Again logging here- unable to remove peer
 					}
