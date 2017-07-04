@@ -155,7 +155,6 @@ var modulesLoader = new function () {
 			{multisignatures: require('../../modules/multisignatures')},
 			{peers: require('../../modules/peers')},
 			{rounds: require('../../modules/rounds')},
-			{server: require('../../modules/server')},
 			{signatures: require('../../modules/signatures')},
 			{sql: require('../../modules/sql')},
 			{system: require('../../modules/system')},
