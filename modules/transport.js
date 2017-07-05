@@ -3,7 +3,6 @@
 var _ = require('lodash');
 var async = require('async');
 var Broadcaster = require('../logic/broadcaster.js');
-var Peer = require('../logic/peer.js');
 var bignum = require('../helpers/bignum.js');
 var constants = require('../helpers/constants.js');
 var ed = require('../helpers/ed.js');
@@ -15,6 +14,7 @@ var schema = require('../schema/transport.js');
 var sandboxHelper = require('../helpers/sandbox.js');
 var sql = require('../sql/transport.js');
 var zlib = require('zlib');
+var Peer = require('../logic/peer');
 
 // Private fields
 var modules, library, self, __private = {}, shared = {};
@@ -85,23 +85,6 @@ __private.hashsum = function (obj) {
 	}
 
 	return bignum.fromBuffer(temp).toString();
-};
-
-/**
- * Bans a peer based on ip, port and clock options.
- * @private
- * @implements {modules.peers.ban}
- * @param {Object} options - Contains code, clock and peer.
- * @param {string} extraMessage
- * @return {boolean} False if there is no peer object
- */
-__private.banPeer = function (options, extraMessage) {
-	if (!options.peer || !options.peer.ip || !options.peer.port) {
-		library.logger.trace('Peer ban skipped', {options: options});
-		return false;
-	}
-	library.logger.debug([options.code, ['Ban', options.peer.string, (options.clock / 60), 'minutes'].join(' '), extraMessage].join(' '));
-	modules.peers.ban(options.peer.ip, options.peer.port, options.clock);
 };
 
 /**
@@ -226,12 +209,12 @@ __private.receiveTransactions = function (query, peer, extraLogMessage, cb) {
 };
 
 /**
- * Normalizes transaction and bans peer if it fails.
+ * Normalizes transaction and remove peer if it fails.
  * Calls balancesSequence.add to receive transaction and
  * processUnconfirmedTransaction to confirm it.
  * @private
  * @implements {library.logic.transaction.objectNormalize}
- * @implements {__private.banPeer}
+ * @implements {__private.removePeer}
  * @implements {library.balancesSequence.add}
  * @implements {modules.transactions.processUnconfirmedTransaction}
  * @param {transaction} transaction
@@ -248,8 +231,7 @@ __private.receiveTransaction = function (transaction, peer, extraLogMessage, cb)
 	} catch (e) {
 		library.logger.debug('Transaction normalization failed', {id: id, err: e.toString(), module: 'transport', tx: transaction});
 
-		// Ban peer for 10 minutes
-		__private.banPeer({peer: peer, code: 'ETRANSACTION', clock: 600}, extraLogMessage);
+		__private.removePeer({peer: peer, code: 'ETRANSACTION'}, extraLogMessage);
 
 		return setImmediate(cb, 'Invalid transaction body - ' + e.toString());
 	}
@@ -401,13 +383,13 @@ Transport.prototype.onNewBlock = function (block, broadcast) {
 		modules.system.update(function () {
 			if (!__private.broadcaster.maxRelays(block) && !modules.loader.syncing()) {
 				modules.peers.list({}, function (err, peers) {
-					async.each(peers.filter(function (peer) { return peer.state === Peer.STATE.ACTIVE; }), function (peer, cb) {
+					async.each(peers.filter(function (peer) { return peer.state === Peer.STATE.CONNECTED; }), function (peer, cb) {
 						var me = library.logic.peers.me();
 						peer.rpc.acceptPeer({peer: me, signature: ed.sign(Buffer.from(JSON.stringify(me), 'hex'), constants.getConst('connectionPrivateKey')).toString('hex')}, function (err) {
 							if (err) {
 								library.logger.debug('Failed to update peer after new block applied', peer.string);
 								cb({errorMsg: err, peer: peer});
-								__private.banPeer({peer: peer, code: 'ECOMMON', clock: 600});
+								__private.removePeer({peer: peer, code: 'ECOMMUNICATION'});
 							} else {
 								library.logger.debug('Peer notified correctly after update', peer.string);
 								cb();
@@ -484,8 +466,7 @@ Transport.prototype.internal = {
 			if (!escapedIds.length) {
 				library.logger.debug('Common block request validation failed', {err: 'ESCAPE', req: query.ids});
 
-				// Ban peer for 10 minutes
-				__private.banPeer({peer: query.peer, code: 'ECOMMON', clock: 600}, query.extraLogMessage);
+				__private.removePeer({peer: query.peer, code: 'ECOMMON'});
 
 				return setImmediate(cb, 'Invalid block id sequence');
 			}
@@ -525,8 +506,7 @@ Transport.prototype.internal = {
 		} catch (e) {
 			library.logger.debug('Block normalization failed', {err: e.toString(), module: 'transport', block: query.block });
 
-			// Ban peer for 10 minutes
-			__private.banPeer({peer: query.peer, code: 'EBLOCK', clock: 600}, query.extraLogMessage);
+			__private.removePeer({peer: query.peer, code: 'EBLOCK'});
 
 			return setImmediate(cb, e.toString());
 		}

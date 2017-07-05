@@ -410,7 +410,7 @@ describe('GET /api/delegates (cache)', function () {
 		var url;
 		url = '/api/delegates';
 
-		node.get(url, function (err, res) {
+		http.get(url, function (err, res) {
 			node.expect(res.body).to.have.property('success').to.be.ok;
 			node.expect(res.body).to.have.property('delegates').that.is.an('array');
 			var response = res.body;
@@ -428,7 +428,7 @@ describe('GET /api/delegates (cache)', function () {
 		orderBy = 'unknown:asc';
 		params = 'orderBy=' + orderBy;
 
-		node.get(url+ params, function (err, res) {
+		http.get(url+ params, function (err, res) {
 			node.expect(res.body).to.have.property('success').to.be.not.ok;
 			node.expect(res.body).to.have.property('error').to.equal('Invalid sort field');
 			cache.getJsonForKey(url + params, function (err, res) {
@@ -443,7 +443,7 @@ describe('GET /api/delegates (cache)', function () {
 		var url;
 		url = '/api/delegates';
 
-		node.get(url, function (err, res) {
+		http.get(url, function (err, res) {
 			node.expect(res.body).to.have.property('success').to.be.ok;
 			node.expect(res.body).to.have.property('delegates').that.is.an('array');
 			var response = res.body;
@@ -558,7 +558,7 @@ describe('GET /api/delegates', function () {
 			node.expect(res.body.delegates).to.have.lengthOf(101);
 			for (var i = 0; i < res.body.delegates.length; i++) {
 				if (res.body.delegates[i + 1] != null) {
-					node.expect(res.body.delegates[i].vote).to.be.at.most(res.body.delegates[i + 1].vote);
+					node.expect(parseInt(res.body.delegates[i].vote)).to.be.at.most(parseInt(res.body.delegates[i + 1].vote));
 				}
 			}
 			done();
@@ -575,7 +575,7 @@ describe('GET /api/delegates', function () {
 			node.expect(res.body.delegates).to.have.lengthOf(101);
 			for (var i = 0; i < res.body.delegates.length; i++) {
 				if (res.body.delegates[i + 1] != null) {
-					node.expect(res.body.delegates[i].vote).to.be.at.least(res.body.delegates[i + 1].vote);
+					node.expect(parseInt(res.body.delegates[i].vote)).to.be.at.least(parseInt(res.body.delegates[i + 1].vote));
 				}
 			}
 			done();

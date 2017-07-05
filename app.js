@@ -81,7 +81,6 @@ var config = {
 	cache: appConfig.redis,
 	cacheEnabled: appConfig.cacheEnabled,
 	modules: {
-		server: './modules/server.js',
 		accounts: './modules/accounts.js',
 		transactions: './modules/transactions.js',
 		blocks: './modules/blocks.js',
@@ -106,7 +105,6 @@ var config = {
 		loader: { http: './api/http/loader.js' },
 		multisignatures: { http: './api/http/multisignatures.js' },
 		peers: { http: './api/http/peers.js' },
-		server: { http: './api/http/server.js' },
 		signatures: { http: './api/http/signatures.js' },
 		transactions: { http: './api/http/transactions.js' },
 		transport: { ws: './api/ws/transport.js' }
@@ -200,10 +198,6 @@ d.run(function () {
 			cb(null, {
 				block: genesisblock
 			});
-		},
-
-		public: function (cb) {
-			cb(null, path.join(__dirname, 'public'));
 		},
 
 		schema: function (cb) {
@@ -346,14 +340,14 @@ d.run(function () {
 		}],
 
 		/**
-		 * Once config, public, genesisblock, logger, build and network are completed,
+		 * Once config, genesisblock, logger, build and network are completed,
 		 * adds configuration to `network.app`.
 		 * @method connect
 		 * @param {object} scope - The results from current execution, 
 		 * at leats will contain the required elements.
 		 * @param {function} cb - Callback function.
 		 */
-		connect: ['config', 'public', 'genesisblock', 'logger', 'build', 'network', function (scope, cb) {
+		connect: ['config', 'genesisblock', 'logger', 'build', 'network', function (scope, cb) {
 			var path = require('path');
 			var bodyParser = require('body-parser');
 			var methodOverride = require('method-override');
@@ -365,11 +359,7 @@ d.run(function () {
 			scope.config.nonce = keys.publicKey.toString('hex');
 			constants.setConst('connectionPrivateKey', keys.privateKey);
 
-			scope.network.app.engine('html', require('ejs').renderFile);
 			scope.network.app.use(require('express-domain-middleware'));
-			scope.network.app.set('view engine', 'ejs');
-			scope.network.app.set('views', path.join(__dirname, 'public'));
-			scope.network.app.use(scope.network.express.static(path.join(__dirname, 'public')));
 			scope.network.app.use(bodyParser.raw({limit: '2mb'}));
 			scope.network.app.use(bodyParser.urlencoded({extended: true, limit: '2mb', parameterLimit: 5000}));
 			scope.network.app.use(bodyParser.json({limit: '2mb'}));
@@ -629,7 +619,6 @@ d.run(function () {
 			 * @property {Object} modules - Several modules functions.
 			 * @property {Object} network - Several network functions.
 			 * @property {string} nonce
-			 * @property {string} public - Path to lisk public folder.
 			 * @property {undefined} ready
 			 * @property {Object} schema - ZSchema with objects.
 			 * @property {Object} sequence - Sequence function, sequence Array.

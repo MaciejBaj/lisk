@@ -23,6 +23,7 @@ var modulesLoader = new function () {
 
 	this.db = null;
 	this.logger = new Logger({ echo: null, errorLevel: config.fileLogLevel, filename: config.logFileName });
+	config.nonce = randomString.generate(16);
 	this.scope = {
 		config: config,
 		genesisblock: { block: genesisblock },
@@ -35,8 +36,7 @@ var modulesLoader = new function () {
 		ed: ed,
 		bus: {
 			message: function () {}
-		},
-		nonce: randomString.generate(16)
+		}
 	};
 
 	/**
@@ -155,7 +155,6 @@ var modulesLoader = new function () {
 			{multisignatures: require('../../modules/multisignatures')},
 			{peers: require('../../modules/peers')},
 			{rounds: require('../../modules/rounds')},
-			{server: require('../../modules/server')},
 			{signatures: require('../../modules/signatures')},
 			{sql: require('../../modules/sql')},
 			{system: require('../../modules/system')},
