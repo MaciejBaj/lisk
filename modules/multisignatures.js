@@ -1,527 +1,514 @@
+/*
+ * Copyright © 2018 Lisk Foundation
+ *
+ * See the LICENSE file at the top-level directory of this distribution
+ * for licensing information.
+ *
+ * Unless otherwise agreed in a custom licensing agreement with the Lisk Foundation,
+ * no part of this software, including this file, may be copied, modified,
+ * propagated, or distributed except according to the terms contained in the
+ * LICENSE file.
+ *
+ * Removal or modification of this copyright notice is prohibited.
+ */
+
 'use strict';
 
-var async = require('async');
-var crypto = require('crypto');
-var extend = require('extend');
-var genesisblock = null;
-var Multisignature = require('../logic/multisignature.js');
-var Router = require('../helpers/router.js');
-var sandboxHelper = require('../helpers/sandbox.js');
-var schema = require('../schema/multisignatures.js');
-var slots = require('../helpers/slots.js');
-var sql = require('../sql/multisignatures.js');
-var transactionTypes = require('../helpers/transactionTypes.js');
+const async = require('async');
+const Multisignature = require('../logic/multisignature.js');
+const transactionTypes = require('../helpers/transaction_types.js');
+const ApiError = require('../helpers/api_error');
+const errorCodes = require('../helpers/api_codes');
 
 // Private fields
-var modules, library, self, __private = {}, shared = {};
+let modules;
+let library;
+let self;
+const __private = {};
 
 __private.assetTypes = {};
 
-// Constructor
-function Multisignatures (cb, scope) {
-	library = scope;
-	genesisblock = library.genesisblock;
+/**
+ * Main multisignatures methods. Initializes library with scope content and generates a Multisignature instance.
+ * Calls logic.transaction.attachAssetType().
+ *
+ * @class
+ * @memberof modules
+ * @see Parent: {@link modules}
+ * @requires async
+ * @requires helpers/api_codes
+ * @requires helpers/api_error
+ * @requires helpers/transaction_types
+ * @requires logic/multisignature
+ * @param {function} cb - Callback function
+ * @param {scope} scope - App instance
+ * @returns {setImmediateCallback} cb, null, self
+ */
+function Multisignatures(cb, scope) {
+	library = {
+		logger: scope.logger,
+		db: scope.db,
+		network: scope.network,
+		schema: scope.schema,
+		bus: scope.bus,
+		balancesSequence: scope.balancesSequence,
+		logic: {
+			transaction: scope.logic.transaction,
+			account: scope.logic.account,
+			multisignature: new Multisignature(
+				scope.schema,
+				scope.network,
+				scope.logic.transaction,
+				scope.logic.account,
+				scope.logger
+			),
+		},
+	};
 	self = this;
 
-	__private.attachApi();
-
-	__private.assetTypes[transactionTypes.MULTI] = library.logic.transaction.attachAssetType(
-		transactionTypes.MULTI, new Multisignature()
+	__private.assetTypes[
+		transactionTypes.MULTI
+	] = library.logic.transaction.attachAssetType(
+		transactionTypes.MULTI,
+		library.logic.multisignature
 	);
 
 	setImmediate(cb, null, self);
 }
 
-// Private methods
-__private.attachApi = function () {
-	var router = new Router();
-
-	router.use(function (req, res, next) {
-		if (modules) { return next(); }
-		res.status(500).send({success: false, error: 'Blockchain is loading'});
-	});
-
-	router.map(shared, {
-		'get /pending': 'pending',
-		'post /sign': 'sign',
-		'put /': 'addMultisignature',
-		'get /accounts': 'getAccounts'
-	});
-
-	router.use(function (req, res, next) {
-		res.status(500).send({success: false, error: 'API endpoint not found'});
-	});
-
-	library.network.app.use('/api/multisignatures', router);
-	library.network.app.use(function (err, req, res, next) {
-		if (!err) { return next(); }
-		library.logger.error('API error ' + req.url, err.message);
-		res.status(500).send({success: false, error: 'API error: ' + err.message});
-	});
-};
-
 // Public methods
-Multisignatures.prototype.processSignature = function (tx, cb) {
-	var transaction = modules.transactions.getMultisignatureTransaction(tx.transaction);
 
-	function done (cb) {
-		library.balancesSequence.add(function (cb) {
-			var transaction = modules.transactions.getMultisignatureTransaction(tx.transaction);
+/**
+ * Check if the provided signature is valid
+ *
+ * @private
+ * @param {Object} signature - Signature data
+ * @param {string} [signature.publicKey] - Public key of account that created the signature (optional)
+ * @param {string} signature.transactionId - Id of transaction that signature was created for
+ * @param {string} signature.signature - Actual signature
+ * @param {Array} membersPublicKeys - Public keys of multisignature account members
+ * @param {Object} transaction - Corresponding transaction grabbed from transaction pool
+ * @returns {boolean} isValid - true if signature passed verification, false otherwise
+ */
+__private.isValidSignature = (signature, membersPublicKeys, transaction) => {
+	let isValid = false;
 
-			if (!transaction) {
-				return setImmediate(cb, 'Transaction not found');
+	try {
+		// If publicKey is provided we can perform direct verify
+		if (signature.publicKey) {
+			// Check if publicKey is present as member of multisignature account in transaction
+			if (!membersPublicKeys.includes(signature.publicKey)) {
+				library.logger.error(
+					'Unable to process signature, signer not in keysgroup.',
+					{ signature, membersPublicKeys, transaction }
+				);
+				return false;
 			}
 
-			modules.accounts.getAccount({
-				address: transaction.senderId
-			}, function (err, sender) {
-				if (err) {
-					return setImmediate(cb, err);
-				} else if (!sender) {
-					return setImmediate(cb, 'Sender not found');
-				} else {
-					transaction.signatures = transaction.signatures || [];
-					transaction.signatures.push(tx.signature);
-					transaction.ready = Multisignature.prototype.ready(transaction, sender);
-
-					library.bus.message('signature', {transaction: tx.transaction, signature: tx.signature}, true);
-					return setImmediate(cb);
-				}
-			});
-		}, cb);
-	}
-
-	if (!transaction) {
-		return setImmediate(cb, 'Transaction not found');
-	}
-
-	if (transaction.type === transactionTypes.MULTI) {
-		transaction.signatures = transaction.signatures || [];
-
-		if (transaction.asset.multisignature.signatures || transaction.signatures.indexOf(tx.signature) !== -1) {
-			return setImmediate(cb, 'Permission to sign transaction denied');
+			// Try to verify the signature
+			isValid = library.logic.transaction.verifySignature(
+				transaction,
+				signature.publicKey,
+				signature.signature
+			);
+		} else {
+			// publicKey is not there - we need to iterate through all members of multisignature account in transaction
+			// Try to find public key for which the signature is passing validation
+			const found = membersPublicKeys.find(memberPublicKey =>
+				// Try to verify the signature
+				library.logic.transaction.verifySignature(
+					transaction,
+					memberPublicKey,
+					signature.signature
+				)
+			);
+			// When public key found - mark signature as valid
+			isValid = !!found;
 		}
-
-		// Find public key
-		var verify = false;
-
-		try {
-			for (var i = 0; i < transaction.asset.multisignature.keysgroup.length && !verify; i++) {
-				var key = transaction.asset.multisignature.keysgroup[i].substring(1);
-				verify = library.logic.transaction.verifySignature(transaction, key, tx.signature);
-			}
-		} catch (e) {
-			library.logger.error(e.stack);
-			return setImmediate(cb, 'Failed to verify signature');
-		}
-
-		if (!verify) {
-			return setImmediate(cb, 'Failed to verify signature');
-		}
-
-		return done(cb);
-	} else {
-		modules.accounts.getAccount({
-			address: transaction.senderId
-		}, function (err, account) {
-			if (err) {
-				return setImmediate(cb, 'Multisignature account not found');
-			}
-
-			var verify = false;
-			var multisignatures = account.multisignatures;
-
-			if (transaction.requesterPublicKey) {
-				multisignatures.push(transaction.senderPublicKey);
-			}
-
-			if (!account) {
-				return setImmediate(cb, 'Account not found');
-			}
-
-			transaction.signatures = transaction.signatures || [];
-
-			if (transaction.signatures.indexOf(tx.signature) >= 0) {
-				return setImmediate(cb, 'Signature already exists');
-			}
-
-			try {
-				for (var i = 0; i < multisignatures.length && !verify; i++) {
-					verify = library.logic.transaction.verifySignature(transaction, multisignatures[i], tx.signature);
-				}
-			} catch (e) {
-				library.logger.error(e.stack);
-				return setImmediate(cb, 'Failed to verify signature');
-			}
-
-			if (!verify) {
-				return setImmediate(cb, 'Failed to verify signature');
-			}
-
-			library.network.io.sockets.emit('multisignatures/signature/change', transaction);
-			return done(cb);
+	} catch (e) {
+		library.logger.error('Unable to process signature, verification failed.', {
+			signature,
+			membersPublicKeys,
+			transaction,
+			error: e.stack,
 		});
 	}
+	return isValid;
 };
 
-Multisignatures.prototype.sandboxApi = function (call, args, cb) {
-	sandboxHelper.callMethod(shared, call, args, cb);
+/**
+ * Validate signature against provided transaction, add signature to transaction if valid and emit events
+ *
+ * @private
+ * @param {Object} signature - Signature data
+ * @param {string} [signature.publicKey] - Public key of account that created the signature (optional)
+ * @param {string} signature.transactionId - Id of transaction that signature was created for
+ * @param {string} signature.signature - Actual signature
+ * @param {Array} membersPublicKeys - Public keys of multisignature account members
+ * @param {Object} transaction - Corresponding transaction grabbed from transaction pool
+ * @param {Object} sender - Account data of sender of the transaction provided above
+ * @param {function} cb - Callback function
+ * @implements {library.logic.multisignature.ready}
+ * @returns {setImmediateCallback} cb, err
+ */
+__private.validateSignature = (
+	signature,
+	membersPublicKeys,
+	transaction,
+	sender,
+	cb
+) => {
+	// Check if signature is valid
+	if (!__private.isValidSignature(signature, membersPublicKeys, transaction)) {
+		return setImmediate(
+			cb,
+			new Error('Unable to process signature, verification failed')
+		);
+	}
+
+	// Add signature to transaction
+	transaction.signatures.push(signature.signature);
+	// Check if transaction is ready to be processed
+	transaction.ready = library.logic.multisignature.ready(transaction, sender);
+
+	// Emit events
+	library.network.io.sockets.emit(
+		'multisignatures/signature/change',
+		transaction
+	);
+	library.bus.message('signature', signature, true);
+	return setImmediate(cb);
+};
+
+/**
+ * Process signature for multisignature account creation, transaction type 4 (MULTI)
+ *
+ * @private
+ * @param {Object} signature - Signature data
+ * @param {string} [signature.publicKey] - Public key of account that created the signature (optional)
+ * @param {string} signature.transactionId - Id of transaction that signature was created for
+ * @param {string} signature.signature - Actual signature
+ * @param {Object} transaction - Corresponding transaction grabbed from transaction pool
+ * @param {function} cb - Callback function
+ * @implements {__private.validateSignature}
+ * @returns {setImmediateCallback} cb, err
+ */
+__private.processSignatureForMultisignatureAccountCreation = (
+	signature,
+	transaction,
+	cb
+) => {
+	// Normalize members of multisignature account from transaction
+	const membersPublicKeys = transaction.asset.multisignature.keysgroup.map(
+		member => member.substring(1) // Remove first character, which is '+'
+	);
+
+	// Set empty object as sender, as we don't need sender in case of multisignature registration
+	const sender = {};
+
+	return __private.validateSignature(
+		signature,
+		membersPublicKeys,
+		transaction,
+		sender,
+		cb
+	);
+};
+
+/**
+ * Process signature for transactions that comes from already estabilished multisignature account
+ *
+ * @private
+ * @param {Object} signature - Signature data
+ * @param {string} [signature.publicKey] - Public key of account that created the signature (optional)
+ * @param {string} signature.transactionId - Id of transaction that signature was created for
+ * @param {string} signature.signature - Actual signature
+ * @param {Object} transaction - Corresponding transaction grabbed from transaction pool
+ * @param {function} cb - Callback function
+ * @implements {__private.validateSignature}
+ * @returns {setImmediateCallback} cb, err
+ */
+__private.processSignatureFromMultisignatureAccount = (
+	signature,
+	transaction,
+	cb
+) => {
+	// Get sender account of correscponding transaction
+	modules.accounts.getAccount(
+		{ address: transaction.senderId },
+		(err, sender) => {
+			if (err || !sender) {
+				const message = 'Unable to process signature, account not found';
+				library.logger.error(message, { signature, transaction, error: err });
+				return setImmediate(cb, new Error(message));
+			}
+
+			// Assign members of multisignature account from transaction
+			const membersPublicKeys = sender.multisignatures;
+
+			return __private.validateSignature(
+				signature,
+				membersPublicKeys,
+				transaction,
+				sender,
+				cb
+			);
+		}
+	);
+};
+
+/**
+ * Main function for processing received signature, includes:
+ * - multisignature account creation
+ * - send from multisignature account
+ *
+ * @public
+ * @param {Object} signature - Signature data
+ * @param {string} [signature.publicKey] - Public key of account that created the signature (optional)
+ * @param {string} signature.transactionId - Id of transaction that signature was created for
+ * @param {string} signature.signature - Actual signature
+ * @param {function} cb - Callback function
+ * @implements {library.balancesSequence.add} - All processing here is done through balancesSequence
+ * @returns {setImmediateCallback} cb, err
+ */
+Multisignatures.prototype.processSignature = function(signature, cb) {
+	if (!signature) {
+		const message = 'Unable to process signature, signature not provided';
+		library.logger.error(message);
+		return setImmediate(cb, new Error(message));
+	}
+
+	// From now perform all the operations via balanceSequence
+	library.balancesSequence.add(balanceSequenceCb => {
+		// Grab transaction with corresponding ID from transaction pool
+		const transaction = modules.transactions.getMultisignatureTransaction(
+			signature.transactionId
+		);
+
+		if (!transaction) {
+			const message =
+				'Unable to process signature, corresponding transaction not found';
+			library.logger.error(message, { signature });
+			return setImmediate(balanceSequenceCb, new Error(message));
+		}
+
+		// If there are no signatures yet - initialise with empty array
+		transaction.signatures = transaction.signatures || [];
+
+		// Check if received signature already exists in transaction
+		if (transaction.signatures.includes(signature.signature)) {
+			const message = 'Unable to process signature, signature already exists';
+			library.logger.error(message, { signature, transaction });
+			return setImmediate(balanceSequenceCb, new Error(message));
+		}
+
+		// Process signature for multisignature account creation transaction
+		if (transaction.type === transactionTypes.MULTI) {
+			return __private.processSignatureForMultisignatureAccountCreation(
+				signature,
+				transaction,
+				balanceSequenceCb
+			);
+		}
+
+		// Process signature for send from multisignature account transaction
+		return __private.processSignatureFromMultisignatureAccount(
+			signature,
+			transaction,
+			balanceSequenceCb
+		);
+	}, cb);
+};
+
+/**
+ * Description of getGroup.
+ *
+ * @todo Add @returns and @param tags
+ * @todo Add description for the function
+ */
+Multisignatures.prototype.getGroup = function(address, cb) {
+	const scope = {};
+
+	async.series(
+		{
+			getAccount(seriesCb) {
+				library.logic.account.getMultiSignature({ address }, (err, account) => {
+					if (err) {
+						return setImmediate(seriesCb, err);
+					}
+
+					if (!account) {
+						return setImmediate(
+							seriesCb,
+							new ApiError(
+								'Multisignature account not found',
+								errorCodes.NOT_FOUND
+							)
+						);
+					}
+
+					scope.group = {
+						address: account.address,
+						publicKey: account.publicKey,
+						secondPublicKey: account.secondPublicKey || '',
+						balance: account.balance,
+						unconfirmedBalance: account.u_balance,
+						min: account.multimin,
+						lifetime: account.multilifetime,
+						members: [],
+					};
+
+					return setImmediate(seriesCb);
+				});
+			},
+			getMembers(seriesCb) {
+				library.db.multisignatures
+					.getMemberPublicKeys(scope.group.address)
+					.then(memberAccountKeys => {
+						const addresses = [];
+
+						memberAccountKeys.forEach(key => {
+							addresses.push(modules.accounts.generateAddressByPublicKey(key));
+						});
+
+						modules.accounts.getAccounts(
+							{ address: addresses },
+							['address', 'publicKey', 'secondPublicKey'],
+							(err, accounts) => {
+								accounts.forEach(account => {
+									scope.group.members.push({
+										address: account.address,
+										publicKey: account.publicKey,
+										secondPublicKey: account.secondPublicKey || '',
+									});
+								});
+
+								return setImmediate(seriesCb);
+							}
+						);
+					});
+			},
+		},
+		err => {
+			if (err) {
+				return setImmediate(cb, err);
+			}
+			return setImmediate(cb, null, scope.group);
+		}
+	);
 };
 
 // Events
-Multisignatures.prototype.onBind = function (scope) {
-	modules = scope;
+/**
+ * Calls Multisignature.bind() with modules params.
+ *
+ * @param {modules} scope - Loaded modules
+ */
+Multisignatures.prototype.onBind = function(scope) {
+	modules = {
+		accounts: scope.accounts,
+		transactions: scope.transactions,
+	};
 
-	__private.assetTypes[transactionTypes.MULTI].bind({
-		modules: modules, library: library
-	});
+	__private.assetTypes[transactionTypes.MULTI].bind(scope.accounts);
 };
 
-// Shared
-shared.getAccounts = function (req, cb) {
-	var scope = {};
-
-	async.series({
-		validateSchema: function (seriesCb) {
-			library.schema.validate(req.body, schema.getAccounts, function (err) {
-				if (err) {
-					return setImmediate(seriesCb, err[0].message);
-				} else {
-					return setImmediate(seriesCb);
-				}
-			});
-		},
-		getAccountIds: function (seriesCb) {
-			library.db.one(sql.getAccountIds, { publicKey: req.body.publicKey }).then(function (row) {
-				scope.accountIds = Array.isArray(row.accountIds) ? row.accountIds : [];
-				return setImmediate(seriesCb);
-			}).catch(function (err) {
-				library.logger.error(err.stack);
-				return setImmediate(seriesCb, 'Multisignature#getAccountIds error');
-			});
-		},
-		getAccounts: function (seriesCb) {
-			modules.accounts.getAccounts({
-				address: { $in: scope.accountIds },
-				sort: 'balance'
-			}, ['address', 'balance', 'multisignatures', 'multilifetime', 'multimin'], function (err, accounts) {
-				if (err) {
-					return setImmediate(seriesCb, err);
-				} else {
-					scope.accounts = accounts;
-					return setImmediate(seriesCb);
-				}
-			});
-		},
-		buildAccounts: function (seriesCb) {
-			async.eachSeries(scope.accounts, function (account, eachSeriesCb) {
-				var addresses = [];
-
-				for (var i = 0; i < account.multisignatures.length; i++) {
-					addresses.push(modules.accounts.generateAddressByPublicKey(account.multisignatures[i]));
-				}
-
-				modules.accounts.getAccounts({
-					address: { $in: addresses }
-				}, ['address', 'publicKey', 'balance'], function (err, multisigaccounts) {
-					if (err) {
-						return setImmediate(eachSeriesCb, err);
-					}
-
-					account.multisigaccounts = multisigaccounts;
-					return setImmediate(eachSeriesCb);
-				});
-			}, seriesCb);
-		}
-	}, function (err) {
-		if (err) {
-			return setImmediate(cb, err);
-		} else {
-			return setImmediate(cb, null, {accounts: scope.accounts});
-		}
-	});
+/**
+ * Checks if `modules` is loaded.
+ *
+ * @returns {boolean} True if `modules` is loaded
+ */
+Multisignatures.prototype.isLoaded = function() {
+	return !!modules;
 };
 
-shared.pending = function (req, cb) {
-	var scope = { pending: [] };
-
-	async.series({
-		validateSchema: function (seriesCb) {
-			library.schema.validate(req.body, schema.pending, function (err) {
-				if (err) {
-					return setImmediate(seriesCb, err[0].message);
-				} else {
-					return setImmediate(seriesCb);
-				}
-			});
-		},
-		getTransactionList: function (seriesCb) {
-			scope.transactions = modules.transactions.getMultisignatureTransactionList(false, false);
-			scope.transactions = scope.transactions.filter(function (transaction) {
-				return transaction.senderPublicKey === req.body.publicKey;
-			});
-
-			return setImmediate(seriesCb);
-		},
-		buildTransactions: function (seriesCb) {
-			async.eachSeries(scope.transactions, function (transaction, eachSeriesCb) {
-				var signed = false;
-
-				if (transaction.signatures && transaction.signatures.length > 0) {
-					var verify = false;
-
-					for (var i in transaction.signatures) {
-						var signature = transaction.signatures[i];
-
-						try {
-							verify = library.logic.transaction.verifySignature(transaction, req.body.publicKey, transaction.signatures[i]);
-						} catch (e) {
-							library.logger.error(e.stack);
-							verify = false;
-						}
-
-						if (verify) {
-							break;
-						}
-					}
-
-					if (verify) {
-						signed = true;
-					}
-				}
-
-				if (!signed && transaction.senderPublicKey === req.body.publicKey) {
-					signed = true;
-				}
-
-				modules.accounts.getAccount({
-					publicKey: transaction.senderPublicKey
-				}, function (err, sender) {
-					if (err) {
-						return setImmediate(cb, err);
-					}
-
-					if (!sender) {
-						return setImmediate(cb, 'Sender not found');
-					}
-
-					var min = sender.u_multimin || sender.multimin;
-					var lifetime = sender.u_multilifetime || sender.multilifetime;
-					var signatures = sender.u_multisignatures || [];
-
-					scope.pending.push({
-						max: signatures.length,
-						min: min,
-						lifetime: lifetime,
-						signed: signed,
-						transaction: transaction
-					});
-
-					return setImmediate(eachSeriesCb);
-				});
-			}, function (err) {
-				return setImmediate(seriesCb, err);
-			});
-		}
-	}, function (err) {
-		return setImmediate(cb, err, {transactions: scope.pending});
-	});
-};
-
-shared.sign = function (req, cb) {
-	var scope = {};
-
-	function checkGroupPermisions (cb) {
-		var permissionDenied = (
-			scope.transaction.asset.multisignature.keysgroup.indexOf('+' + scope.keypair.publicKey.toString('hex')) === -1
-		);
-
-		if (permissionDenied) {
-			return setImmediate(cb, 'Permission to sign transaction denied');
-		}
-
-		var alreadySigned = (
-			Array.isArray(scope.transaction.signatures) &&
-			scope.transaction.signatures.indexOf(scope.signature.toString('hex')) !== -1
-		);
-
-		if (alreadySigned) {
-			return setImmediate(cb, 'Transaction already signed');
-		}
-
-		return setImmediate(cb);
-	}
-
-	function checkTransactionPermissions (cb) {
-		var permissionDenied = true;
-
-		if (!scope.transaction.requesterPublicKey) {
-			permissionDenied = (
-				(!Array.isArray(scope.sender.multisignatures) || scope.sender.multisignatures.indexOf(scope.keypair.publicKey.toString('hex')) === -1)
-			);
-		} else {
-			permissionDenied = (
-				(scope.sender.publicKey !== scope.keypair.publicKey.toString('hex') || (scope.transaction.senderPublicKey !== scope.keypair.publicKey.toString('hex')))
-			);
-		}
-
-		if (permissionDenied)  {
-			return setImmediate(cb, 'Permission to sign transaction denied');
-		}
-
-		var alreadySigned = (scope.transaction.signatures && scope.transaction.signatures.indexOf(scope.signature) !== -1);
-
-		if (alreadySigned) {
-			return setImmediate(cb, 'Transaction already signed');
-		}
-
-		return setImmediate(cb);
-	}
-
-	library.balancesSequence.add(function (cb) {
-		async.series({
-			validateSchema: function (seriesCb) {
-				library.schema.validate(req.body, schema.sign, function (err) {
-					if (err) {
-						return setImmediate(seriesCb, err[0].message);
-					} else {
-						return setImmediate(seriesCb);
-					}
-				});
-			},
-			signTransaction: function (seriesCb) {
-				scope.transaction = modules.transactions.getMultisignatureTransaction(req.body.transactionId);
-
-				if (!scope.transaction) {
-					return setImmediate(seriesCb, 'Transaction not found');
-				}
-
-				scope.hash = crypto.createHash('sha256').update(req.body.secret, 'utf8').digest();
-				scope.keypair = library.ed.makeKeypair(scope.hash);
-
-				if (req.body.publicKey) {
-					if (scope.keypair.publicKey.toString('hex') !== req.body.publicKey) {
-						return setImmediate(seriesCb, 'Invalid passphrase');
-					}
-				}
-
-				scope.signature = library.logic.transaction.multisign(scope.keypair, scope.transaction);
-				return setImmediate(seriesCb);
-			},
-			getAccount: function (seriesCb) {
-				modules.accounts.getAccount({
-					address: scope.transaction.senderId
-				}, function (err, sender) {
-					if (err) {
-						return setImmediate(seriesCb, err);
-					} else if (!sender) {
-						return setImmediate(seriesCb, 'Sender not found');
-					} else {
-						scope.sender = sender;
-						return setImmediate(seriesCb);
-					}
-				});
-			},
-			checkPermissions: function (seriesCb) {
-				if (scope.transaction.type === transactionTypes.MULTI) {
-					return checkGroupPermisions(seriesCb);
-				} else {
-					return checkTransactionPermissions(seriesCb);
-				}
-			}
-		}, function (err) {
+// Shared API
+/**
+ * @todo Implement API comments with apidoc
+ * @see {@link http://apidocjs.com/}
+ */
+Multisignatures.prototype.shared = {
+	/**
+	 * Search accounts based on the query parameter passed.
+	 *
+	 * @param {Object} filters - Filters applied to results
+	 * @param {string} filters.address - Account address
+	 * @param {function} cb - Callback function
+	 * @returns {setImmediateCallback} cb
+	 */
+	getGroups(filters, cb) {
+		self.getGroup(filters.address, (err, group) => {
 			if (err) {
 				return setImmediate(cb, err);
 			}
-
-			var transaction = modules.transactions.getMultisignatureTransaction(req.body.transactionId);
-
-			if (!transaction) {
-				return setImmediate(cb, 'Transaction not found');
-			}
-
-			transaction.signatures = transaction.signatures || [];
-			transaction.signatures.push(scope.signature);
-			transaction.ready = Multisignature.prototype.ready(transaction, scope.sender);
-
-			library.bus.message('signature', {transaction: transaction.id, signature: scope.signature}, true);
-			library.network.io.sockets.emit('multisignatures/signature/change', transaction);
-
-			return setImmediate(cb, null, {transactionId: transaction.id});
+			return setImmediate(cb, null, [group]);
 		});
-	}, cb);
-};
+	},
 
-shared.addMultisignature = function (req, cb) {
-	var scope = {};
+	/**
+	 * Search accounts based on the query parameter passed.
+	 * @param {Object} filters - Filters applied to results.
+	 * @param {string} filters.address - Account address.
+	 * @param {function} cb - Callback function.
+	 * @returns {setImmediateCallback} cb
+	 */
+	getMemberships(filters, cb) {
+		const scope = {};
 
-	library.balancesSequence.add(function (cb) {
-		async.series({
-			validateSchema: function (seriesCb) {
-				library.schema.validate(req.body, schema.addMultisignature, function (err) {
-					if (err) {
-						return setImmediate(seriesCb, err[0].message);
-					} else {
-						return setImmediate(seriesCb);
-					}
-				});
-			},
-			addMultisignature: function (seriesCb) {
-				scope.hash = crypto.createHash('sha256').update(req.body.secret, 'utf8').digest();
-				scope.keypair = library.ed.makeKeypair(scope.hash);
+		async.series(
+			{
+				getAccount(seriesCb) {
+					library.logic.account.get(
+						{ address: filters.address },
+						(err, account) => {
+							if (err) {
+								return setImmediate(seriesCb, err);
+							}
 
-				if (req.body.publicKey) {
-					if (scope.keypair.publicKey.toString('hex') !== req.body.publicKey) {
-						return setImmediate(seriesCb, 'Invalid passphrase');
-					}
-				}
+							if (!account) {
+								return setImmediate(
+									seriesCb,
+									new ApiError(
+										'Multisignature membership account not found',
+										errorCodes.NOT_FOUND
+									)
+								);
+							}
 
-				modules.accounts.setAccountAndGet({publicKey: scope.keypair.publicKey.toString('hex')}, function (err, account) {
-					if (err) {
-						return setImmediate(seriesCb, err);
-					}
+							scope.targetAccount = account;
 
-					if (!account || !account.publicKey) {
-						return setImmediate(seriesCb, 'Account not found');
-					}
+							return setImmediate(seriesCb);
+						}
+					);
+				},
+				getGroupAccountIds(seriesCb) {
+					library.db.multisignatures
+						.getGroupIds(scope.targetAccount.publicKey)
+						.then(groupAccountIds => {
+							scope.groups = [];
 
-					if (account.secondSignature && !req.body.secondSecret) {
-						return setImmediate(seriesCb, 'Invalid second passphrase');
-					}
+							async.each(
+								groupAccountIds,
+								(groupId, callback) => {
+									self.getGroup(groupId, (err, group) => {
+										scope.groups.push(group);
 
-					scope.secondKeypair = null;
-
-					if (account.secondSignature) {
-						scope.secondHash = crypto.createHash('sha256').update(req.body.secondSecret, 'utf8').digest();
-						scope.secondKeypair = library.ed.makeKeypair(scope.secondHash);
-					}
-
-					try {
-						scope.transaction = library.logic.transaction.create({
-							type: transactionTypes.MULTI,
-							sender: account,
-							keypair: scope.keypair,
-							secondKeypair: scope.secondKeypair,
-							min: req.body.min,
-							keysgroup: req.body.keysgroup,
-							lifetime: req.body.lifetime
+										return setImmediate(callback);
+									});
+								},
+								err => setImmediate(seriesCb, err)
+							);
 						});
-					} catch (e) {
-						return setImmediate(seriesCb, e.toString());
-					}
-
-					modules.transactions.receiveTransactions([scope.transaction], true, seriesCb);
-				});
+				},
+			},
+			err => {
+				if (err) {
+					return setImmediate(cb, err);
+				}
+				return setImmediate(cb, null, scope.groups);
 			}
-		}, function (err) {
-			if (err) {
-				return setImmediate(cb, err);
-			} else {
-				library.network.io.sockets.emit('multisignatures/change', scope.transaction);
-				return setImmediate(cb, null, {transactionId: scope.transaction.id});
-			}
-		});
-	}, cb);
+		);
+	},
 };
 
 // Export

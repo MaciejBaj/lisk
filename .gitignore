@@ -1,15 +1,42 @@
+# General
 .DS_Store
-.ed25519-node
-.idea/
 .project
 __MACOSX/
-dapps/
-logs/*.log
-node_modules
-nodejs/
-npm-debug.log
-release
+*.swp
+*.swo
+release/
 ssl/
+tmp/
+
+# Build revision file generated while building a release
+REVISION
+
+# Dependency directories
+node_modules/
+
+# Docs
+docs/jsdoc/
+
+# Logs
+logs/*.log
+npm-debug.log
+tmux-client-*.log
+test/network/logs/
 stacktrace*
-tmp
+
+# IDE directories
+.vscode/
+.idea/
+Session.vim
+
+# Config files
 sftp-config.json
+test/network/pm2.network.json
+!test/network/configs/config.non-forge.json
+test/network/configs/
+
+# Coverage directory used by tools like istanbul
+test/.coverage-unit/
+
+# Local config file useful for development
+config.local.json

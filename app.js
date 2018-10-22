@@ -1,495 +1,881 @@
+/*
+ * Copyright © 2018 Lisk Foundation
+ *
+ * See the LICENSE file at the top-level directory of this distribution
+ * for licensing information.
+ *
+ * Unless otherwise agreed in a custom licensing agreement with the Lisk Foundation,
+ * no part of this software, including this file, may be copied, modified,
+ * propagated, or distributed except according to the terms contained in the
+ * LICENSE file.
+ *
+ * Removal or modification of this copyright notice is prohibited.
+ */
+
 'use strict';
 
-var async = require('async');
-var checkIpInList = require('./helpers/checkIpInList.js');
-var extend = require('extend');
-var fs = require('fs');
-var genesisblock = require('./genesisBlock.json');
-var git = require('./helpers/git.js');
-var https = require('https');
-var Logger = require('./logger.js');
-var packageJson = require('./package.json');
-var path = require('path');
-var program = require('commander');
-var Sequence = require('./helpers/sequence.js');
-var util = require('util');
-var z_schema = require('./helpers/z_schema.js');
+// eslint-disable-next-line import/order
+const AppConfig = require('./helpers/config.js');
 
+/**
+ * Default list of configuration options. Can be overridden by CLI.
+ *
+ * @memberof! app
+ * @default 'config.json'
+ */
+// As newrelic is using `LISK_NETWORK` to initialize app name
+// so we have to initialize configuration before requiring the newrelic
+// eslint-disable-next-line import/order
+const appConfig = AppConfig(require('./package.json'));
+
+// eslint-disable-next-line import/order
+const NewRelicConfig = require('./newrelic.js').config;
+
+if (NewRelicConfig.license_key || process.env.NEW_RELIC_LICENSE_KEY) {
+	require('./helpers/newrelic_lisk');
+}
+
+var path = require('path');
+var fs = require('fs');
+var d = require('domain').create();
+var dns = require('dns');
+var net = require('net');
+var SocketCluster = require('socketcluster');
+var async = require('async');
+var Logger = require('./logger.js');
+var wsRPC = require('./api/ws/rpc/ws_rpc').wsRPC;
+var wsTransport = require('./api/ws/transport');
+var git = require('./helpers/git.js');
+var Sequence = require('./helpers/sequence.js');
+var httpApi = require('./helpers/http_api.js');
+// eslint-disable-next-line import/order
+var swaggerHelper = require('./helpers/swagger');
+
+/**
+ * Main application entry point.
+ *
+ * @namespace app
+ * @requires async
+ * @requires domain.create
+ * @requires fs
+ * @requires socketcluster
+ * @requires logger.js
+ * @requires api/ws/rpc/ws_rpc.wsRPC
+ * @requires helpers/config
+ * @requires helpers/git
+ * @requires helpers/http_api
+ * @requires {@link helpers.Sequence}
+ * @requires helpers/swagger
+ * @requires config/swagger
+ */
+
+/**
+ * Handles app instance (acts as global variable, passed as parameter).
+ *
+ * @global
+ * @typedef {Object} scope
+ * @property {Object} api
+ * @property {undefined} balancesSequence
+ * @property {string} build
+ * @property {Object} bus
+ * @property {Object} config
+ * @property {undefined} connect
+ * @property {Object} db
+ * @property {Object} ed
+ * @property {Object} genesisBlock
+ * @property {string} lastCommit
+ * @property {Object} listen
+ * @property {Object} logger
+ * @property {Object} logic
+ * @property {Object} modules
+ * @property {Object} network
+ * @property {string} nonce
+ * @property {undefined} ready
+ * @property {Object} schema
+ * @property {Object} sequence
+ * @todo Add description for nonce and ready
+ */
+
+// Define workers_controller path
+var workersControllerPath = path.join(__dirname, 'workers_controller');
+
+// Begin reading from stdin
 process.stdin.resume();
 
+// Read build version from file
 var versionBuild = fs.readFileSync(path.join(__dirname, 'build'), 'utf8');
+
 /**
- * Hash of last git commit
+ * Hash of the last git commit.
  *
- * @private
- * @property lastCommit
- * @type {String}
- * @default ''
+ * @memberof! app
  */
 var lastCommit = '';
 
 if (typeof gc !== 'undefined') {
-	setInterval(function () {
-		gc();
+	setInterval(() => {
+		gc(); // eslint-disable-line no-undef
 	}, 60000);
 }
 
-program
-	.version(packageJson.version)
-	.option('-c, --config <path>', 'config file path')
-	.option('-p, --port <port>', 'listening port number')
-	.option('-a, --address <ip>', 'listening host name or ip')
-	.option('-x, --peers [peers...]', 'peers list')
-	.option('-l, --log <level>', 'log level')
-	.option('-s, --snapshot <round>', 'verify snapshot')
-	.parse(process.argv);
+// Global objects to be utilized under modules/helpers where scope is not accessible
+global.constants = appConfig.constants;
+global.exceptions = appConfig.exceptions;
 
-var appConfig = require('./helpers/config.js')(program.config);
-
-if (program.port) {
-	appConfig.port = program.port;
-}
-
-if (program.address) {
-	appConfig.address = program.address;
-}
-
-if (program.peers) {
-	if (typeof program.peers === 'string') {
-		appConfig.peers.list = program.peers.split(',').map(function (peer) {
-			peer = peer.split(':');
-			return {
-				ip: peer.shift(),
-				port: peer.shift() || appConfig.port
-			};
-		});
-	} else {
-		appConfig.peers.list = [];
-	}
-}
-
-if (program.log) {
-	appConfig.consoleLogLevel = program.log;
-}
-
-if (program.snapshot) {
-	appConfig.loading.snapshot = Math.abs(
-		Math.floor(program.snapshot)
-	);
-}
-
-// Define top endpoint availability
-process.env.TOP =  appConfig.topAccounts;
-
+/**
+ * Application config object.
+ *
+ * @memberof! app
+ */
 var config = {
 	db: appConfig.db,
+	cache: appConfig.redis,
+	cacheEnabled: appConfig.cacheEnabled,
 	modules: {
-		server: './modules/server.js',
 		accounts: './modules/accounts.js',
-		transactions: './modules/transactions.js',
 		blocks: './modules/blocks.js',
-		signatures: './modules/signatures.js',
-		transport: './modules/transport.js',
-		loader: './modules/loader.js',
-		system: './modules/system.js',
-		peers: './modules/peers.js',
+		cache: './modules/cache.js',
+		dapps: './modules/dapps.js',
 		delegates: './modules/delegates.js',
 		rounds: './modules/rounds.js',
+		loader: './modules/loader.js',
 		multisignatures: './modules/multisignatures.js',
-		dapps: './modules/dapps.js',
-		crypto: './modules/crypto.js',
-		sql: './modules/sql.js'
-	}
+		node: './modules/node.js',
+		peers: './modules/peers.js',
+		system: './modules/system.js',
+		signatures: './modules/signatures.js',
+		transactions: './modules/transactions.js',
+		transport: './modules/transport.js',
+		voters: './modules/voters',
+	},
 };
 
-var logger = new Logger({ echo: appConfig.consoleLogLevel, errorLevel: appConfig.fileLogLevel, filename: appConfig.logFileName });
+/**
+ * Application logger instance.
+ *
+ * @memberof! app
+ */
+var logger = new Logger({
+	echo: process.env.LOG_LEVEL || appConfig.consoleLogLevel,
+	errorLevel: process.env.FILE_LOG_LEVEL || appConfig.fileLogLevel,
+	filename: appConfig.logFileName,
+});
 
-// Trying to get last git commit
-try { 
+/**
+ * Db logger instance.
+ *
+ * @memberof! app
+ */
+var dbLogger = null;
+
+if (
+	appConfig.db.logFileName &&
+	appConfig.db.logFileName === appConfig.logFileName
+) {
+	dbLogger = logger;
+} else {
+	// since log levels for database monitor are different than node app, i.e. "query", "info", "error" etc, which is decided using "logEvents" property
+	dbLogger = new Logger({
+		echo: process.env.DB_LOG_LEVEL || 'log',
+		errorLevel: process.env.FILE_LOG_LEVEL || 'log',
+		filename: appConfig.db.logFileName,
+	});
+}
+
+// Try to get the last git commit
+try {
 	lastCommit = git.getLastCommit();
 } catch (err) {
 	logger.debug('Cannot get last git commit', err.message);
 }
 
-var d = require('domain').create();
-
-d.on('error', function (err) {
+// Domain error handler
+d.on('error', err => {
 	logger.fatal('Domain master', { message: err.message, stack: err.stack });
-	process.exit(0);
+	process.emit('cleanup', err);
 });
 
-d.run(function () {
+logger.info(`Starting lisk with "${appConfig.network}" genesis block.`);
+// Run domain
+d.run(() => {
 	var modules = [];
-	async.auto({
-		config: function (cb) {
-			try {
-				appConfig.nethash = new Buffer(genesisblock.payloadHash, 'hex').toString('hex');
-			} catch (e) {
-				logger.error('Failed to assign nethash from genesis block');
-				throw Error(e);
-			}
-
-			if (appConfig.dapp.masterrequired && !appConfig.dapp.masterpassword) {
-				var randomstring = require('randomstring');
-
-				appConfig.dapp.masterpassword = randomstring.generate({
-					length: 12,
-					readable: true,
-					charset: 'alphanumeric'
-				});
-
-				if (appConfig.loading.snapshot != null) {
-					delete appConfig.loading.snapshot;
+	async.auto(
+		{
+			/**
+			 * Prepare the config object.
+			 *
+			 * @func config
+			 * @memberof! app
+			 * @param {function} cb - Callback function
+			 * @throws {Error} If unable to assign nethash from genesis block
+			 */
+			config(cb) {
+				if (!appConfig.nethash) {
+					throw Error('Failed to assign nethash from genesis block');
 				}
 
-				fs.writeFile('./config.json', JSON.stringify(appConfig, null, 4), 'utf8', function (err) {
-					cb(err, appConfig);
-				});
-			} else {
-				cb(null, appConfig);
-			}
-		},
-
-		logger: function (cb) {
-			cb(null, logger);
-		},
-
-		build: function (cb) {
-			cb(null, versionBuild);
-		},
-		/**
-		 * Returns hash of last git commit
-		 * 
-		 * @property lastCommit
-		 * @type {Function}
-		 * @async
-		 * @param  {Function} cb Callback function
-		 * @return {Function} cb Callback function from params
-		 * @return {Object}   cb.err Always return `null` here
-		 * @return {String}   cb.lastCommit Hash of last git commit
-		 */
-		lastCommit: function (cb) {
-			cb(null, lastCommit);
-		},
-
-		genesisblock: function (cb) {
-			cb(null, {
-				block: genesisblock
-			});
-		},
-
-		public: function (cb) {
-			cb(null, path.join(__dirname, 'public'));
-		},
-
-		schema: function (cb) {
-			cb(null, new z_schema());
-		},
-
-		network: ['config', function (scope, cb) {
-			var express = require('express');
-			var compression = require('compression');
-			var cors = require('cors');
-			var app = express();
-
-			require('./helpers/request-limiter')(app, appConfig);
-
-			app.use(compression({ level: 9 }));
-			app.use(cors());
-			app.options('*', cors());
-
-			var server = require('http').createServer(app);
-			var io = require('socket.io')(server);
-
-			var privateKey, certificate, https, https_io;
-
-			if (scope.config.ssl.enabled) {
-				privateKey = fs.readFileSync(scope.config.ssl.options.key);
-				certificate = fs.readFileSync(scope.config.ssl.options.cert);
-
-				https = require('https').createServer({
-					key: privateKey,
-					cert: certificate,
-					ciphers: 'ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:' + 'ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES256-SHA384:ECDHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA256:HIGH:' + '!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA'
-				}, app);
-
-				https_io = require('socket.io')(https);
-			}
-
-			cb(null, {
-				express: express,
-				app: app,
-				server: server,
-				io: io,
-				https: https,
-				https_io: https_io
-			});
-		}],
-
-		dbSequence: ['logger', function (scope, cb) {
-			var sequence = new Sequence({
-				onWarning: function (current, limit) {
-					scope.logger.warn('DB queue', current);
-				}
-			});
-			cb(null, sequence);
-		}],
-
-		sequence: ['logger', function (scope, cb) {
-			var sequence = new Sequence({
-				onWarning: function (current, limit) {
-					scope.logger.warn('Main queue', current);
-				}
-			});
-			cb(null, sequence);
-		}],
-
-		balancesSequence: ['logger', function (scope, cb) {
-			var sequence = new Sequence({
-				onWarning: function (current, limit) {
-					scope.logger.warn('Balance queue', current);
-				}
-			});
-			cb(null, sequence);
-		}],
-
-		connect: ['config', 'public', 'genesisblock', 'logger', 'build', 'network', function (scope, cb) {
-			var path = require('path');
-			var bodyParser = require('body-parser');
-			var methodOverride = require('method-override');
-			var queryParser = require('express-query-int');
-
-			scope.network.app.engine('html', require('ejs').renderFile);
-			scope.network.app.use(require('express-domain-middleware'));
-			scope.network.app.set('view engine', 'ejs');
-			scope.network.app.set('views', path.join(__dirname, 'public'));
-			scope.network.app.use(scope.network.express.static(path.join(__dirname, 'public')));
-			scope.network.app.use(bodyParser.raw({limit: '2mb'}));
-			scope.network.app.use(bodyParser.urlencoded({extended: true, limit: '2mb', parameterLimit: 5000}));
-			scope.network.app.use(bodyParser.json({limit: '2mb'}));
-			scope.network.app.use(methodOverride());
-
-			var ignore = ['id', 'name', 'lastBlockId', 'blockId', 'transactionId', 'address', 'recipientId', 'senderId', 'previousBlock'];
-
-			scope.network.app.use(queryParser({
-				parser: function (value, radix, name) {
-					if (ignore.indexOf(name) >= 0) {
-						return value;
-					}
-
-					// Ignore conditional fields for transactions list
-					if (/^.+?:(blockId|recipientId|senderId)$/.test(name)) {
-						return value;
-					}
-
-					/*jslint eqeq: true*/
-					if (isNaN(value) || parseInt(value) != value || isNaN(parseInt(value, radix))) {
-						return value;
-					}
-
-					return parseInt(value);
-				}
-			}));
-
-			scope.network.app.use(require('./helpers/z_schema-express.js')(scope.schema));
-
-			scope.network.app.use(function (req, res, next) {
-				var parts = req.url.split('/');
-				var ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-
-				// Log client connections
-				logger.log(req.method + ' ' + req.url + ' from ' + ip);
-
-				/* Instruct browser to deny display of <frame>, <iframe> regardless of origin.
-				 *
-				 * RFC -> https://tools.ietf.org/html/rfc7034
-				 */
-				res.setHeader('X-Frame-Options', 'DENY');
-
-				/* Set Content-Security-Policy headers.
-				 *
-				 * frame-ancestors - Defines valid sources for <frame>, <iframe>, <object>, <embed> or <applet>.
-				 *
-				 * W3C Candidate Recommendation -> https://www.w3.org/TR/CSP/
-				 */
-				res.setHeader('Content-Security-Policy', 'frame-ancestors \'none\'');
-
-				if (parts.length > 1) {
-					if (parts[1] === 'api') {
-						if (!checkIpInList(scope.config.api.access.whiteList, ip, true)) {
-							res.sendStatus(403);
-						} else {
-							next();
+				// In case domain names are used, resolve those to IP addresses.
+				var peerDomainLookupTasks = appConfig.peers.list.map(
+					peer => callback => {
+						if (net.isIPv4(peer.ip)) {
+							return setImmediate(() => {
+								callback(null, peer);
+							});
 						}
-					} else if (parts[1] === 'peer') {
-						if (checkIpInList(scope.config.peers.blackList, ip, false)) {
-							res.sendStatus(403);
-						} else {
-							next();
-						}
-					} else {
-						next();
-					}
-				} else {
-					next();
-				}
-			});
-
-			scope.network.server.listen(scope.config.port, scope.config.address, function (err) {
-				scope.logger.info('Lisk started: ' + scope.config.address + ':' + scope.config.port);
-
-				if (!err) {
-					if (scope.config.ssl.enabled) {
-						scope.network.https.listen(scope.config.ssl.options.port, scope.config.ssl.options.address, function (err) {
-							scope.logger.info('Lisk https started: ' + scope.config.ssl.options.address + ':' + scope.config.ssl.options.port);
-
-							cb(err, scope.network);
+						dns.lookup(peer.ip, { family: 4 }, (err, address) => {
+							if (err) {
+								console.error(
+									`Failed to resolve peer domain name ${
+										peer.ip
+									} to an IP address`
+								);
+								return callback(err, peer);
+							}
+							callback(null, Object.assign({}, peer, { ip: address }));
 						});
-					} else {
-						cb(null, scope.network);
 					}
-				} else {
-					cb(err, scope.network);
-				}
-			});
+				);
 
-		}],
+				async.parallel(peerDomainLookupTasks, (err, results) => {
+					if (err) {
+						cb(err, appConfig);
+						return;
+					}
+					appConfig.peers.list = results;
+					cb(null, appConfig);
+				});
+			},
 
-		ed: function (cb) {
-			cb(null, require('./helpers/ed.js'));
-		},
+			logger(cb) {
+				cb(null, logger);
+			},
 
-		bus: ['ed', function (scope, cb) {
-			var changeCase = require('change-case');
-			var bus = function () {
-				this.message = function () {
-					var args = [];
-					Array.prototype.push.apply(args, arguments);
-					var topic = args.shift();
-					modules.forEach(function (module) {
-						var eventName = 'on' + changeCase.pascalCase(topic);
-						if (typeof(module[eventName]) === 'function') {
-							module[eventName].apply(module[eventName], args);
+			build(cb) {
+				cb(null, versionBuild);
+			},
+
+			/**
+			 * Returns hash of the last git commit.
+			 *
+			 * @func lastCommit
+			 * @memberof! app
+			 * @param {function} cb - Callback function
+			 */
+			lastCommit(cb) {
+				cb(null, lastCommit);
+			},
+
+			genesisBlock(cb) {
+				cb(null, {
+					block: appConfig.genesisBlock,
+				});
+			},
+
+			schema(cb) {
+				cb(null, swaggerHelper.getValidator());
+			},
+
+			network: [
+				'config',
+				/**
+				 * Initalizes express, middleware, socket.io.
+				 *
+				 * @func network[1]
+				 * @memberof! app
+				 * @param {Object} scope
+				 * @param {function} cb - Callback function
+				 */
+				function(scope, cb) {
+					var express = require('express');
+					var app = express();
+
+					if (appConfig.coverage) {
+						// eslint-disable-next-line import/no-extraneous-dependencies
+						var im = require('istanbul-middleware');
+						logger.debug(
+							'Hook loader for coverage - Do not use in production environment!'
+						);
+						im.hookLoader(__dirname);
+						app.use('/coverage', im.createHandler());
+					}
+
+					if (appConfig.trustProxy) {
+						app.enable('trust proxy');
+					}
+
+					var server = require('http').createServer(app);
+					var io = require('socket.io')(server);
+
+					var privateKey;
+					var certificate;
+					var https;
+					var https_io;
+
+					if (scope.config.api.ssl.enabled) {
+						privateKey = fs.readFileSync(scope.config.api.ssl.options.key);
+						certificate = fs.readFileSync(scope.config.api.ssl.options.cert);
+
+						https = require('https').createServer(
+							{
+								key: privateKey,
+								cert: certificate,
+								ciphers:
+									'ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES256-SHA384:ECDHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA256:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA',
+							},
+							app
+						);
+
+						https_io = require('socket.io')(https);
+					}
+
+					cb(null, {
+						express,
+						app,
+						server,
+						io,
+						https,
+						https_io,
+					});
+				},
+			],
+
+			sequence: [
+				'logger',
+				/**
+				 * Description of the function.
+				 *
+				 * @func sequence[1]
+				 * @memberof! app
+				 * @param {Object} scope
+				 * @param {function} cb - Callback function
+				 * @todo Add description for the function and its params
+				 */
+				function(scope, cb) {
+					var sequence = new Sequence({
+						onWarning(current) {
+							scope.logger.warn('Main queue', current);
+						},
+					});
+					cb(null, sequence);
+				},
+			],
+
+			balancesSequence: [
+				'logger',
+				/**
+				 * Description of the function.
+				 *
+				 * @func balancesSequence[1]
+				 * @memberof! app
+				 * @param {Object} scope
+				 * @param {function} cb - Callback function
+				 * @todo Add description for the function and its params
+				 */
+				function(scope, cb) {
+					var sequence = new Sequence({
+						onWarning(current) {
+							scope.logger.warn('Balance queue', current);
+						},
+					});
+					cb(null, sequence);
+				},
+			],
+
+			swagger: [
+				'modules',
+				'logger',
+				'cache',
+				/**
+				 * Description of the function.
+				 *
+				 * @func swagger[4]
+				 * @memberof! app
+				 * @param {Object} scope
+				 * @param {function} cb - Callback function
+				 * @todo Add description for the function and its params
+				 */
+				function(scope, cb) {
+					httpApi.bootstrapSwagger(
+						scope.network.app,
+						scope.config,
+						scope.logger,
+						scope,
+						cb
+					);
+				},
+			],
+
+			/**
+			 * Description of the function.
+			 *
+			 * @func ed
+			 * @memberof! app
+			 * @param {function} cb - Callback function
+			 * @todo Add description for the function and its params
+			 */
+			ed(cb) {
+				cb(null, require('./helpers/ed.js'));
+			},
+
+			bus: [
+				'ed',
+				/**
+				 * Description of the function.
+				 *
+				 * @func bus[1]
+				 * @memberof! app
+				 * @param {Object} scope
+				 * @param {function} cb - Callback function
+				 * @todo Add description for the function and its params
+				 */
+				function(scope, cb) {
+					var changeCase = require('change-case');
+					var bus = function() {
+						this.message = function() {
+							var args = [];
+							Array.prototype.push.apply(args, arguments);
+							var topic = args.shift();
+							var eventName = `on${changeCase.pascalCase(topic)}`;
+
+							// Iterate over modules and execute event functions (on*)
+							modules.forEach(module => {
+								if (typeof module[eventName] === 'function') {
+									module[eventName].apply(module[eventName], args);
+								}
+								if (module.submodules) {
+									async.each(module.submodules, submodule => {
+										if (
+											submodule &&
+											typeof submodule[eventName] === 'function'
+										) {
+											submodule[eventName].apply(submodule[eventName], args);
+										}
+									});
+								}
+							});
+						};
+					};
+					cb(null, new bus());
+				},
+			],
+
+			/**
+			 * Description of the function.
+			 *
+			 * @memberof! app
+			 * @param {function} cb - Callback function
+			 * @todo Add description for the function and its params
+			 */
+			db(cb) {
+				var db = require('./db');
+				db
+					.connect(config.db, dbLogger)
+					.then(db => cb(null, db))
+					.catch(err => {
+						console.error(err);
+					});
+			},
+
+			/**
+			 * Description of the function.
+			 *
+			 * @memberof! app
+			 * @param {function} cb
+			 * @todo Add description for the params
+			 */
+			cache(cb) {
+				var cache = require('./helpers/cache.js');
+				logger.debug(
+					`Cache ${appConfig.cacheEnabled ? 'Enabled' : 'Disabled'}`
+				);
+				cache.connect(config.cacheEnabled, config.cache, logger, cb);
+			},
+
+			webSocket: [
+				'config',
+				'logger',
+				'network',
+				'db',
+				/**
+				 * Description of the function.
+				 *
+				 * @func webSocket[5]
+				 * @memberof! app
+				 * @param {Object} scope
+				 * @param {function} cb - Callback function
+				 * @todo Add description for the function and its params
+				 */
+				function(scope, cb) {
+					var webSocketConfig = {
+						workers: scope.config.wsWorkers,
+						port: scope.config.wsPort,
+						host: '0.0.0.0',
+						wsEngine: scope.config.peers.options.wsEngine,
+						appName: 'lisk',
+						workerController: workersControllerPath,
+						perMessageDeflate: false,
+						secretKey: 'liskSecretKey',
+						// Because our node is constantly sending messages, we don't
+						// need to use the ping feature to detect bad connections.
+						pingTimeoutDisabled: true,
+						// Maximum amount of milliseconds to wait before force-killing
+						// a process after it was passed a 'SIGTERM' or 'SIGUSR2' signal
+						processTermTimeout: 10000,
+						logLevel: 0,
+					};
+
+					var childProcessOptions = {
+						version: scope.config.version,
+						minVersion: scope.config.minVersion,
+						nethash: scope.config.nethash,
+						port: scope.config.wsPort,
+						nonce: scope.config.nonce,
+						blackListedPeers: scope.config.peers.access.blackList,
+					};
+
+					scope.socketCluster = new SocketCluster(webSocketConfig);
+					var MasterWAMPServer = require('wamp-socket-cluster/MasterWAMPServer');
+					scope.network.app.rpc = wsRPC.setServer(
+						new MasterWAMPServer(scope.socketCluster, childProcessOptions)
+					);
+
+					scope.socketCluster.on('ready', () => {
+						scope.logger.info('Socket Cluster ready for incoming connections');
+						cb();
+					});
+
+					// The 'fail' event aggregates errors from all SocketCluster processes.
+					scope.socketCluster.on('fail', err => {
+						scope.logger.error(err);
+						if (err.name === 'WSEngineInitError') {
+							var extendedError =
+								'If you are not able to install sc-uws, you can try setting the wsEngine property in config.json to "ws" before starting the node';
+							scope.logger.error(extendedError);
 						}
 					});
-				};
-			};
-			cb(null, new bus());
-		}],
 
-		db: function (cb) {
-			var db = require('./helpers/database.js');
-			db.connect(config.db, logger, cb);
+					scope.socketCluster.on('workerExit', workerInfo => {
+						var exitMessage = `Worker with pid ${workerInfo.pid} exited`;
+						if (workerInfo.signal) {
+							exitMessage += ` due to signal: '${workerInfo.signal}'`;
+						}
+						scope.logger.error(exitMessage);
+					});
+				},
+			],
+
+			logic: [
+				'db',
+				'bus',
+				'schema',
+				'genesisBlock',
+				/**
+				 * Description of the function.
+				 *
+				 * @func logic[4]
+				 * @memberof! app
+				 * @param {Object} scope
+				 * @param {function} cb - Callback function
+				 */
+				function(scope, cb) {
+					var Transaction = require('./logic/transaction.js');
+					var Block = require('./logic/block.js');
+					var Account = require('./logic/account.js');
+					var Peers = require('./logic/peers.js');
+
+					async.auto(
+						{
+							bus(cb) {
+								cb(null, scope.bus);
+							},
+							config(cb) {
+								cb(null, scope.config);
+							},
+							db(cb) {
+								cb(null, scope.db);
+							},
+							ed(cb) {
+								cb(null, scope.ed);
+							},
+							logger(cb) {
+								cb(null, logger);
+							},
+							schema(cb) {
+								cb(null, scope.schema);
+							},
+							genesisBlock(cb) {
+								cb(null, scope.genesisBlock);
+							},
+							account: [
+								'db',
+								'bus',
+								'ed',
+								'schema',
+								'genesisBlock',
+								'logger',
+								function(scope, cb) {
+									new Account(scope.db, scope.schema, scope.logger, cb);
+								},
+							],
+							transaction: [
+								'db',
+								'bus',
+								'ed',
+								'schema',
+								'genesisBlock',
+								'account',
+								'logger',
+								function(scope, cb) {
+									new Transaction(
+										scope.db,
+										scope.ed,
+										scope.schema,
+										scope.genesisBlock,
+										scope.account,
+										scope.logger,
+										cb
+									);
+								},
+							],
+							block: [
+								'db',
+								'bus',
+								'ed',
+								'schema',
+								'genesisBlock',
+								'account',
+								'transaction',
+								function(scope, cb) {
+									new Block(scope.ed, scope.schema, scope.transaction, cb);
+								},
+							],
+							peers: [
+								'logger',
+								'config',
+								function(scope, cb) {
+									new Peers(scope.logger, scope.config, cb);
+								},
+							],
+						},
+						cb
+					);
+				},
+			],
+
+			modules: [
+				'network',
+				'webSocket',
+				'config',
+				'logger',
+				'bus',
+				'sequence',
+				'balancesSequence',
+				'db',
+				'logic',
+				'cache',
+				/**
+				 * Description of the function.
+				 *
+				 * @func modules[12]
+				 * @param {Object} scope
+				 * @param {function} cb - Callback function
+				 */
+				function(scope, cb) {
+					var tasks = {};
+
+					Object.keys(config.modules).forEach(name => {
+						tasks[name] = function(cb) {
+							var d = require('domain').create();
+
+							d.on('error', err => {
+								scope.logger.fatal(`Domain ${name}`, {
+									message: err.message,
+									stack: err.stack,
+								});
+							});
+
+							d.run(() => {
+								logger.debug('Loading module', name);
+								// eslint-disable-next-line import/no-dynamic-require
+								var Klass = require(config.modules[name]);
+								var obj = new Klass(cb, scope);
+								modules.push(obj);
+							});
+						};
+					});
+
+					async.parallel(tasks, (err, results) => {
+						cb(err, results);
+					});
+				},
+			],
+
+			ready: [
+				'swagger',
+				'modules',
+				'bus',
+				'logic',
+				/**
+				 * Description of the function.
+				 *
+				 * @func ready[4]
+				 * @memberof! app
+				 * @param {Object} scope
+				 * @param {function} cb - Callback function
+				 * @todo Add description for the function and its params
+				 */
+				function(scope, cb) {
+					scope.modules.swagger = scope.swagger;
+
+					// Fire onBind event in every module
+					scope.bus.message('bind', scope.modules);
+
+					scope.logic.peers.bindModules(scope.modules);
+					cb();
+				},
+			],
+
+			listenWebSocket: [
+				'ready',
+				/**
+				 * Description of the function.
+				 *
+				 * @func api[1]
+				 * @param {Object} scope
+				 * @param {function} cb - Callback function
+				 */
+				function(scope, cb) {
+					new wsTransport(scope.modules.transport);
+					cb();
+				},
+			],
+
+			listenHttp: [
+				'ready',
+				/**
+				 * Description of the function.
+				 *
+				 * @func listen[1]
+				 * @memberof! app
+				 * @param {Object} scope
+				 * @param {function} cb - Callback function
+				 */
+				function(scope, cb) {
+					scope.network.server.listen(
+						scope.config.httpPort,
+						scope.config.address,
+						err => {
+							scope.logger.info(
+								`Lisk started: ${scope.config.address}:${scope.config.httpPort}`
+							);
+
+							if (!err) {
+								if (scope.config.api.ssl.enabled) {
+									scope.network.https.listen(
+										scope.config.api.ssl.options.port,
+										scope.config.api.ssl.options.address,
+										err => {
+											scope.logger.info(
+												`Lisk https started: ${
+													scope.config.api.ssl.options.address
+												}:${scope.config.api.ssl.options.port}`
+											);
+
+											cb(err, scope.network);
+										}
+									);
+								} else {
+									cb(null, scope.network);
+								}
+							} else {
+								cb(err, scope.network);
+							}
+						}
+					);
+				},
+			],
 		},
-
-		logic: ['db', 'bus', 'schema', 'genesisblock', function (scope, cb) {
-			var Transaction = require('./logic/transaction.js');
-			var Block = require('./logic/block.js');
-			var Account = require('./logic/account.js');
-
-			async.auto({
-				bus: function (cb) {
-					cb(null, scope.bus);
-				},
-				db: function (cb) {
-					cb(null, scope.db);
-				},
-				ed: function (cb) {
-					cb(null, scope.ed);
-				},
-				logger: function (cb) {
-					cb(null, logger);
-				},
-				schema: function (cb) {
-					cb(null, scope.schema);
-				},
-				genesisblock: function (cb) {
-					cb(null, {
-						block: genesisblock
-					});
-				},
-				account: ['db', 'bus', 'ed', 'schema', 'genesisblock', function (scope, cb) {
-					new Account(scope, cb);
-				}],
-				transaction: ['db', 'bus', 'ed', 'schema', 'genesisblock', 'account', function (scope, cb) {
-					new Transaction(scope, cb);
-				}],
-				block: ['db', 'bus', 'ed', 'schema', 'genesisblock', 'account', 'transaction', function (scope, cb) {
-					new Block(scope, cb);
-				}]
-			}, cb);
-		}],
-
-		modules: ['network', 'connect', 'config', 'logger', 'bus', 'sequence', 'dbSequence', 'balancesSequence', 'db', 'logic', function (scope, cb) {
-			var tasks = {};
-
-			Object.keys(config.modules).forEach(function (name) {
-				tasks[name] = function (cb) {
-					var d = require('domain').create();
-
-					d.on('error', function (err) {
-						scope.logger.fatal('Domain ' + name, {message: err.message, stack: err.stack});
-					});
-
-					d.run(function () {
-						logger.debug('Loading module', name);
-						var Klass = require(config.modules[name]);
-						var obj = new Klass(cb, scope);
-						modules.push(obj);
-					});
-				};
-			});
-
-			async.parallel(tasks, function (err, results) {
-				cb(err, results);
-			});
-		}],
-
-		ready: ['modules', 'bus', function (scope, cb) {
-			scope.bus.message('bind', scope.modules);
-			cb();
-		}]
-	}, function (err, scope) {
-		if (err) {
-			logger.fatal(err);
-		} else {
-			scope.logger.info('Modules ready and launched');
-
-			process.once('cleanup', function () {
-				scope.logger.info('Cleaning up...');
-				async.eachSeries(modules, function (module, cb) {
-					if (typeof(module.cleanup) === 'function') {
-						module.cleanup(cb);
-					} else {
-						setImmediate(cb);
+		(err, scope) => {
+			// Receives a 'cleanup' signal and cleans all modules
+			process.once('cleanup', (error, code) => {
+				if (error) {
+					logger.fatal(error.toString());
+					if (code === undefined) {
+						code = 1;
 					}
-				}, function (err) {
-					if (err) {
-						scope.logger.error(err);
-					} else {
-						scope.logger.info('Cleaned up successfully');
+				} else if (code === undefined || code === null) {
+					code = 0;
+				}
+				logger.info('Cleaning up...');
+				if (scope.socketCluster) {
+					scope.socketCluster.removeAllListeners('fail');
+					scope.socketCluster.destroy();
+				}
+				// Run cleanup operation on each module before shutting down the node;
+				// this includes operations like snapshotting database tables.
+				async.eachSeries(
+					modules,
+					(module, cb) => {
+						if (typeof module.cleanup === 'function') {
+							module.cleanup(cb);
+						} else {
+							setImmediate(cb);
+						}
+					},
+					err => {
+						if (err) {
+							logger.error(err);
+						} else {
+							logger.info('Cleaned up successfully');
+						}
+						process.exit(code);
 					}
-					process.exit(1);
-				});
+				);
 			});
 
-			process.once('SIGTERM', function () {
+			process.once('SIGTERM', () => {
 				process.emit('cleanup');
 			});
 
-			process.once('exit', function () {
+			process.once('exit', code => {
+				process.emit('cleanup', null, code);
+			});
+
+			process.once('SIGINT', () => {
 				process.emit('cleanup');
 			});
 
-			process.once('SIGINT', function () {
-				process.emit('cleanup');
-			});
+			if (err) {
+				logger.fatal(err);
+				process.emit('cleanup', err);
+			} else {
+				scope.logger.info('Modules ready and launched');
+			}
 		}
-	});
+	);
 });
 
-process.on('uncaughtException', function (err) {
+// TODO: This should be the only place in the master process where
+// 'uncaughtException' is handled. Right now, one of our dependencies (js-nacl;
+// which is a dependency of lisk-elements) adds its own handler which interferes
+// with our own process exit logic.
+process.on('uncaughtException', err => {
 	// Handle error safely
 	logger.fatal('System error', { message: err.message, stack: err.stack });
-	process.emit('cleanup');
+	process.emit('cleanup', err);
+});
+
+process.on('unhandledRejection', err => {
+	// Handle unhandledRejection safely
+	logger.fatal('System promise rejection', {
+		message: err.message,
+		stack: err.stack,
+	});
+	process.emit('cleanup', err);
+});
+
+process.on('unhandledRejection', err => {
+	// Handle error safely
+	logger.fatal('System error', { message: err.message, stack: err.stack });
+	process.emit('cleanup', err);
 });

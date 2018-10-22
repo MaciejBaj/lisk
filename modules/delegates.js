@@ -1,227 +1,214 @@
+/*
+ * Copyright © 2018 Lisk Foundation
+ *
+ * See the LICENSE file at the top-level directory of this distribution
+ * for licensing information.
+ *
+ * Unless otherwise agreed in a custom licensing agreement with the Lisk Foundation,
+ * no part of this software, including this file, may be copied, modified,
+ * propagated, or distributed except according to the terms contained in the
+ * LICENSE file.
+ *
+ * Removal or modification of this copyright notice is prohibited.
+ */
+
 'use strict';
 
-var _ = require('lodash');
-var async = require('async');
-var bignum = require('../helpers/bignum.js');
-var BlockReward = require('../logic/blockReward.js');
-var checkIpInList = require('../helpers/checkIpInList.js');
-var constants = require('../helpers/constants.js');
-var crypto = require('crypto');
-var Delegate = require('../logic/delegate.js');
-var extend = require('extend');
-var MilestoneBlocks = require('../helpers/milestoneBlocks.js');
-var OrderBy = require('../helpers/orderBy.js');
-var Router = require('../helpers/router.js');
-var sandboxHelper = require('../helpers/sandbox.js');
-var schema = require('../schema/delegates.js');
-var slots = require('../helpers/slots.js');
-var sql = require('../sql/delegates.js');
-var transactionTypes = require('../helpers/transactionTypes.js');
+const crypto = require('crypto');
+const _ = require('lodash');
+const async = require('async');
+const lisk = require('lisk-elements').default;
+const apiCodes = require('../helpers/api_codes.js');
+const ApiError = require('../helpers/api_error.js');
+const BlockReward = require('../logic/block_reward.js');
+const jobsQueue = require('../helpers/jobs_queue.js');
+const Delegate = require('../logic/delegate.js');
+const slots = require('../helpers/slots.js');
+const Bignum = require('../helpers/bignum.js');
+const transactionTypes = require('../helpers/transaction_types.js');
 
 // Private fields
-var modules, library, self, __private = {}, shared = {};
+let modules;
+let library;
+let self;
+const { ACTIVE_DELEGATES } = global.constants;
+const __private = {};
 
 __private.assetTypes = {};
 __private.loaded = false;
-__private.blockReward = new BlockReward();
 __private.keypairs = {};
+__private.tmpKeypairs = {};
+__private.forgeInterval = 1000;
 
-// Constructor
-function Delegates (cb, scope) {
-	library = scope;
-	self = this;
+/**
+ * Main delegates methods. Initializes library with scope content and generates a Delegate instance.
+ * Calls logic.transaction.attachAssetType().
+ *
+ * @class
+ * @memberof modules
+ * @see Parent: {@link modules}
+ * @requires async
+ * @requires crypto
+ * @requires lodash
+ * @requires helpers/api_codes
+ * @requires helpers/api_error
+ * @requires helpers/jobs_queue
+ * @requires helpers/slots
+ * @requires logic/block_reward
+ * @requires logic/delegate
+ * @param {scope} scope - App instance
+ * @param {function} cb - Callback function
+ * @returns {setImmediateCallback} cb, err, self
+ */
+class Delegates {
+	constructor(cb, scope) {
+		library = {
+			logger: scope.logger,
+			sequence: scope.sequence,
+			ed: scope.ed,
+			db: scope.db,
+			network: scope.network,
+			schema: scope.schema,
+			balancesSequence: scope.balancesSequence,
+			logic: {
+				transaction: scope.logic.transaction,
+			},
+			config: {
+				forging: {
+					delegates: scope.config.forging.delegates,
+					force: scope.config.forging.force,
+					defaultPassword: scope.config.forging.defaultPassword,
+					access: {
+						whiteList: scope.config.forging.access.whiteList,
+					},
+				},
+			},
+		};
+		self = this;
+		__private.blockReward = new BlockReward();
+		__private.assetTypes[
+			transactionTypes.DELEGATE
+		] = library.logic.transaction.attachAssetType(
+			transactionTypes.DELEGATE,
+			new Delegate(scope.logger, scope.schema)
+		);
 
-	__private.attachApi();
-
-	__private.assetTypes[transactionTypes.DELEGATE] = library.logic.transaction.attachAssetType(
-		transactionTypes.DELEGATE, new Delegate()
-	);
-
-	setImmediate(cb, null, self);
+		setImmediate(cb, null, self);
+	}
 }
 
-// Private methods
-__private.attachApi = function () {
-	var router = new Router();
-
-	router.use(function (req, res, next) {
-		if (modules && __private.loaded) { return next(); }
-		res.status(500).send({success: false, error: 'Blockchain is loading'});
-	});
-
-	router.map(shared, {
-		'get /count': 'count',
-		'get /search': 'search',
-		'get /voters': 'getVoters',
-		'get /get': 'getDelegate',
-		'get /': 'getDelegates',
-		'get /fee': 'getFee',
-		'get /forging/getForgedByAccount': 'getForgedByAccount',
-		'put /': 'addDelegate',
-		'get /getNextForgers': 'getNextForgers'
-	});
-
-	if (process.env.DEBUG) {
-		var tmpKepairs = {};
-
-		router.get('/forging/disableAll', function (req, res) {
-			if (Object.keys(tmpKepairs).length !== 0) {
-				return res.json({success: false});
-			}
-
-			tmpKepairs = __private.keypairs;
-			__private.keypairs = {};
-			return res.json({success: true});
-		});
-
-		router.get('/forging/enableAll', function (req, res) {
-			if (Object.keys(tmpKepairs).length === 0) {
-				return res.json({success: false});
-			}
-
-			__private.keypairs = tmpKepairs;
-			tmpKepairs = {};
-			return res.json({success: true});
-		});
-	}
-
-	router.post('/forging/enable', function (req, res) {
-		if (!checkIpInList(library.config.forging.access.whiteList, req.ip)) {
-			return res.json({success: false, error: 'Access denied'});
-		}
-
-		library.schema.validate(req.body, schema.enableForging, function (err) {
+/**
+ * Gets delegate public keys sorted by vote descending.
+ *
+ * @private
+ * @param {function} cb - Callback function
+ * @param {Object} tx - Database transaction/task object
+ * @returns {setImmediateCallback} cb
+ * @todo Add description for the return value
+ */
+__private.getKeysSortByVote = function(cb, tx) {
+	modules.accounts.getAccounts(
+		{
+			isDelegate: 1,
+			sort: { vote: -1, publicKey: 1 },
+			limit: ACTIVE_DELEGATES,
+		},
+		['publicKey'],
+		(err, rows) => {
 			if (err) {
-				return res.json({success: false, error: err[0].message});
+				return setImmediate(cb, err);
 			}
-
-			var keypair = library.ed.makeKeypair(crypto.createHash('sha256').update(req.body.secret, 'utf8').digest());
-
-			if (req.body.publicKey) {
-				if (keypair.publicKey.toString('hex') !== req.body.publicKey) {
-					return res.json({success: false, error: 'Invalid passphrase'});
-				}
-			}
-
-			if (__private.keypairs[keypair.publicKey.toString('hex')]) {
-				return res.json({success: false, error: 'Forging is already enabled'});
-			}
-
-			modules.accounts.getAccount({publicKey: keypair.publicKey.toString('hex')}, function (err, account) {
-				if (err) {
-					return res.json({success: false, error: err});
-				}
-				if (account && account.isDelegate) {
-					__private.keypairs[keypair.publicKey.toString('hex')] = keypair;
-					library.logger.info('Forging enabled on account: ' + account.address);
-					return res.json({success: true, address: account.address});
-				} else {
-					return res.json({success: false, error: 'Delegate not found'});
-				}
-			});
-		});
-	});
-
-	router.post('/forging/disable', function (req, res) {
-		if (!checkIpInList(library.config.forging.access.whiteList, req.ip)) {
-			return res.json({success: false, error: 'Access denied'});
-		}
-
-		library.schema.validate(req.body, schema.disableForging, function (err) {
-			if (err) {
-				return res.json({success: false, error: err[0].message});
-			}
-
-			var keypair = library.ed.makeKeypair(crypto.createHash('sha256').update(req.body.secret, 'utf8').digest());
-
-			if (req.body.publicKey) {
-				if (keypair.publicKey.toString('hex') !== req.body.publicKey) {
-					return res.json({success: false, error: 'Invalid passphrase'});
-				}
-			}
-
-			if (!__private.keypairs[keypair.publicKey.toString('hex')]) {
-				return res.json({success: false, error: 'Delegate not found'});
-			}
-
-			modules.accounts.getAccount({publicKey: keypair.publicKey.toString('hex')}, function (err, account) {
-				if (err) {
-					return res.json({success: false, error: err});
-				}
-				if (account && account.isDelegate) {
-					delete __private.keypairs[keypair.publicKey.toString('hex')];
-					library.logger.info('Forging disabled on account: ' + account.address);
-					return res.json({success: true, address: account.address});
-				} else {
-					return res.json({success: false, error: 'Delegate not found'});
-				}
-			});
-		});
-	});
-
-	router.get('/forging/status', function (req, res) {
-		if (!checkIpInList(library.config.forging.access.whiteList, req.ip)) {
-			return res.json({success: false, error: 'Access denied'});
-		}
-
-		library.schema.validate(req.query, schema.forgingStatus, function (err) {
-			if (err) {
-				return res.json({success: false, error: err[0].message});
-			}
-
-			if (req.query.publicKey) {
-				return res.json({success: true, enabled: !!__private.keypairs[req.query.publicKey]});
-			} else {
-				var delegates_cnt = _.keys(__private.keypairs).length;
-				return res.json({success: true, enabled: (delegates_cnt > 0 ? true : false), delegates: _.keys(__private.keypairs) });
-			}
-		});
-	});
-
-	// router.map(__private, {
-	//   'post /forging/enable': 'enableForging',
-	//   'post /forging/disable': 'disableForging',
-	//   'get /forging/status': 'statusForging'
-	// });
-
-	library.network.app.use('/api/delegates', router);
-	library.network.app.use(function (err, req, res, next) {
-		if (!err) { return next(); }
-		library.logger.error('API error ' + req.url, err.message);
-		res.status(500).send({success: false, error: 'API error: ' + err.message});
-	});
+			return setImmediate(cb, null, rows.map(el => el.publicKey));
+		},
+		tx
+	);
 };
 
-__private.getKeysSortByVote = function (cb) {
-	modules.accounts.getAccounts({
-		isDelegate: 1,
-		sort: {'vote': -1, 'publicKey': 1},
-		limit: slots.delegates
-	}, ['publicKey'], function (err, rows) {
-		if (err) {
-			return setImmediate(cb, err);
-		}
-		return setImmediate(cb, null, rows.map(function (el) {
-			return el.publicKey;
-		}));
-	});
+/**
+ * Gets delegate public keys from previous round, sorted by vote descending.
+ *
+ * @private
+ * @param {function} cb - Callback function
+ * @param {Object} tx - Database transaction/task object
+ * @returns {setImmediateCallback} cb
+ * @todo Add description for the return value
+ */
+__private.getDelegatesFromPreviousRound = function(cb, tx) {
+	(tx || library.db).rounds
+		.getDelegatesSnapshot(ACTIVE_DELEGATES)
+		.then(rows => {
+			const delegatesPublicKeys = [];
+			rows.forEach(row => {
+				delegatesPublicKeys.push(row.publicKey.toString('hex'));
+			});
+			return setImmediate(cb, null, delegatesPublicKeys);
+		})
+		.catch(err => {
+			library.logger.error(err.stack);
+			return setImmediate(cb, 'getDelegatesSnapshot database query failed');
+		});
 };
 
-__private.getBlockSlotData = function (slot, height, cb) {
-	self.generateDelegateList(height, function (err, activeDelegates) {
+/**
+ * Generates delegate list and checks if block generator publicKey matches delegate id.
+ *
+ * @param {block} block
+ * @param {function} source - Source function for get delegates
+ * @param {function} cb - Callback function
+ * @returns {setImmediateCallback} cb, err
+ * @todo Add description for the params
+ */
+__private.validateBlockSlot = function(block, source, cb) {
+	const round = slots.calcRound(block.height);
+	self.generateDelegateList(round, source, (err, activeDelegates) => {
 		if (err) {
 			return setImmediate(cb, err);
 		}
 
-		var currentSlot = slot;
-		var lastSlot = slots.getLastSlot(currentSlot);
+		const currentSlot = slots.getSlotNumber(block.timestamp);
+		const delegateId = activeDelegates[currentSlot % ACTIVE_DELEGATES];
+
+		if (delegateId && block.generatorPublicKey === delegateId) {
+			return setImmediate(cb);
+		}
+		library.logger.error(
+			`Expected generator: ${delegateId} Received generator: ${
+				block.generatorPublicKey
+			}`
+		);
+		return setImmediate(cb, `Failed to verify slot: ${currentSlot}`);
+	});
+};
+
+/**
+ * Gets slot time and keypair.
+ *
+ * @private
+ * @param {number} slot
+ * @param {number} height
+ * @param {function} cb - Callback function
+ * @returns {setImmediateCallback} cb, err, {time, keypair}
+ * @todo Add description for the params
+ */
+__private.getBlockSlotData = function(slot, height, cb) {
+	const round = slots.calcRound(height);
+	self.generateDelegateList(round, null, (err, activeDelegates) => {
+		if (err) {
+			return setImmediate(cb, err);
+		}
+
+		let currentSlot = slot;
+		const lastSlot = slots.getLastSlot(currentSlot);
 
 		for (; currentSlot < lastSlot; currentSlot += 1) {
-			var delegate_pos = currentSlot % slots.delegates;
-			var delegate_id = activeDelegates[delegate_pos];
+			const delegate_pos = currentSlot % ACTIVE_DELEGATES;
+			const delegate_id = activeDelegates[delegate_pos];
 
 			if (delegate_id && __private.keypairs[delegate_id]) {
-				return setImmediate(cb, null, {time: slots.getSlotTime(currentSlot), keypair: __private.keypairs[delegate_id]});
+				return setImmediate(cb, null, {
+					time: slots.getSlotTime(currentSlot),
+					keypair: __private.keypairs[delegate_id],
+				});
 			}
 		}
 
@@ -229,678 +216,915 @@ __private.getBlockSlotData = function (slot, height, cb) {
 	});
 };
 
-__private.forge = function (cb) {
+/**
+ * Gets peers, checks consensus and generates new block, once delegates
+ * are enabled, client is ready to forge and is the correct slot.
+ *
+ * @private
+ * @param {function} cb - Callback function
+ * @returns {setImmediateCallback} cb
+ * @todo Add description for the return value
+ */
+__private.forge = function(cb) {
 	if (!Object.keys(__private.keypairs).length) {
 		library.logger.debug('No delegates enabled');
-		return __private.loadDelegates(cb);
+		return setImmediate(cb);
 	}
 
 	// When client is not loaded, is syncing or round is ticking
 	// Do not try to forge new blocks as client is not ready
-	if (!__private.loaded || modules.loader.syncing() || !modules.rounds.loaded() || modules.rounds.ticking()) {
+	if (
+		!__private.loaded ||
+		modules.loader.syncing() ||
+		!modules.rounds.loaded() ||
+		modules.rounds.ticking()
+	) {
 		library.logger.debug('Client not ready to forge');
 		return setImmediate(cb);
 	}
 
-	var currentSlot = slots.getSlotNumber();
-	var lastBlock = modules.blocks.getLastBlock();
+	const currentSlot = slots.getSlotNumber();
+	const lastBlock = modules.blocks.lastBlock.get();
 
 	if (currentSlot === slots.getSlotNumber(lastBlock.timestamp)) {
 		library.logger.debug('Waiting for next delegate slot');
 		return setImmediate(cb);
 	}
 
-	__private.getBlockSlotData(currentSlot, lastBlock.height + 1, function (err, currentBlockData) {
-		if (err || currentBlockData === null) {
-			library.logger.warn('Skipping delegate slot', err);
-			return setImmediate(cb);
-		}
-
-		if (slots.getSlotNumber(currentBlockData.time) !== slots.getSlotNumber()) {
-			library.logger.debug('Delegate slot', slots.getSlotNumber());
-			return setImmediate(cb);
-		}
-
-		library.sequence.add(function (cb) {
-			async.series({
-				getPeers: function (seriesCb) {
-					return modules.transport.getPeers({limit: constants.maxPeers}, seriesCb);
-				},
-				checkBroadhash: function (seriesCb) {
-					if (modules.transport.poorConsensus()) {
-						return setImmediate(seriesCb, ['Inadequate broadhash consensus', modules.transport.consensus(), '%'].join(' '));
-					} else {
-						return setImmediate(seriesCb);
-					}
-				}
-			}, function (err) {
-				if (err) {
-					library.logger.warn(err);
-					return setImmediate(cb, err);
-				} else {
-					return modules.blocks.generateBlock(currentBlockData.keypair, currentBlockData.time, cb);
-				}
-			});
-		}, function (err) {
-			if (err) {
-				library.logger.error('Failed to generate block within delegate slot', err);
-			} else {
-				modules.blocks.lastReceipt(new Date());
-
-				library.logger.info([
-					'Forged new block id:',
-					modules.blocks.getLastBlock().id,
-					'height:', modules.blocks.getLastBlock().height,
-					'round:', modules.rounds.calc(modules.blocks.getLastBlock().height),
-					'slot:', slots.getSlotNumber(currentBlockData.time),
-					'reward:' + modules.blocks.getLastBlock().reward
-				].join(' '));
+	__private.getBlockSlotData(
+		currentSlot,
+		lastBlock.height + 1,
+		(err, currentBlockData) => {
+			if (err || currentBlockData === null) {
+				library.logger.warn('Skipping delegate slot', err);
+				return setImmediate(cb);
 			}
 
-			return setImmediate(cb);
-		});
-	});
+			if (
+				slots.getSlotNumber(currentBlockData.time) !== slots.getSlotNumber()
+			) {
+				library.logger.debug('Delegate slot', slots.getSlotNumber());
+				return setImmediate(cb);
+			}
+
+			if (modules.transport.poorConsensus()) {
+				const consensusErr = [
+					'Inadequate broadhash consensus before forging a block:',
+					modules.peers.getLastConsensus(),
+					'%',
+				].join(' ');
+
+				library.logger.error(
+					'Failed to generate block within delegate slot',
+					consensusErr
+				);
+				return setImmediate(cb);
+			}
+
+			library.logger.info(
+				[
+					'Broadhash consensus before forging a block:',
+					modules.peers.getLastConsensus(),
+					'%',
+				].join(' ')
+			);
+
+			modules.blocks.process.generateBlock(
+				currentBlockData.keypair,
+				currentBlockData.time,
+				blockGenerationErr => {
+					if (blockGenerationErr) {
+						library.logger.error(
+							'Failed to generate block within delegate slot',
+							blockGenerationErr
+						);
+
+						return setImmediate(cb);
+					}
+
+					const forgedBlock = modules.blocks.lastBlock.get();
+					modules.blocks.lastReceipt.update();
+
+					library.logger.info(
+						[
+							'Forged new block id:',
+							forgedBlock.id,
+							'height:',
+							forgedBlock.height,
+							'round:',
+							slots.calcRound(forgedBlock.height),
+							'slot:',
+							slots.getSlotNumber(currentBlockData.time),
+							`reward: ${forgedBlock.reward}`,
+						].join(' ')
+					);
+
+					return setImmediate(cb);
+				}
+			);
+		}
+	);
 };
 
-__private.checkDelegates = function (publicKey, votes, state, cb) {
+/**
+ * Returns the decrypted passphrase by deciphering encrypted passphrase with the password provided using aes-256-gcm algorithm.
+ *
+ * @private
+ * @param {string} encryptedPassphrase
+ * @param {string} password
+ * @throws {error} If unable to decrypt using password.
+ * @returns {string} Decrypted passphrase
+ * @todo Add description for the params
+ */
+__private.decryptPassphrase = function(encryptedPassphrase, password) {
+	return lisk.cryptography.decryptPassphraseWithPassword(
+		lisk.cryptography.parseEncryptedPassphrase(encryptedPassphrase),
+		password
+	);
+};
+
+/**
+ * Checks each vote integrity and controls total votes don't exceed active delegates.
+ * Calls modules.accounts.getAccount() to validate delegate account and votes accounts.
+ *
+ * @private
+ * @param {publicKey} publicKey
+ * @param {Array} votes
+ * @param {string} state - 'confirmed' to delegates, otherwise u_delegates
+ * @param {function} cb - Callback function
+ * @returns {setImmediateCallback} cb, err
+ * @todo Add description for the params
+ */
+__private.checkDelegates = function(senderPublicKey, votes, state, cb, tx) {
 	if (!Array.isArray(votes)) {
 		return setImmediate(cb, 'Votes must be an array');
 	}
 
-	modules.accounts.getAccount({publicKey: publicKey}, function (err, account) {
-		if (err) {
-			return setImmediate(cb, err);
-		}
+	let votesWithAction;
 
-		if (!account) {
-			return setImmediate(cb, 'Account not found');
-		}
+	try {
+		// TODO: Use Hashmap to improve performance further.
+		votesWithAction = votes.map(vote => {
+			const action = vote[0];
 
-		var delegates = (state === 'confirmed') ? account.delegates : account.u_delegates;
-		var existing_votes = Array.isArray(delegates) ? delegates.length : 0;
-		var additions = 0, removals = 0;
-
-		async.eachSeries(votes, function (action, cb) {
-			var math = action[0];
-
-			if (math === '+') {
-				additions += 1;
-			} else if (math === '-') {
-				removals += 1;
-			} else {
-				return setImmediate(cb, 'Invalid math operator');
+			if (action !== '+' && action !== '-') {
+				throw 'Invalid math operator';
 			}
+			const votePublicKey = vote.slice(1);
 
-			var publicKey = action.slice(1);
-
-			try {
-				new Buffer(publicKey, 'hex');
-			} catch (e) {
-				library.logger.error(e.stack);
-				return setImmediate(cb, 'Invalid public key');
-			}
-
-			if (math === '+' && (delegates != null && delegates.indexOf(publicKey) !== -1)) {
-				return setImmediate(cb, 'Failed to add vote, account has already voted for this delegate');
-			}
-
-			if (math === '-' && (delegates === null || delegates.indexOf(publicKey) === -1)) {
-				return setImmediate(cb, 'Failed to remove vote, account has not voted for this delegate');
-			}
-
-			modules.accounts.getAccount({ publicKey: publicKey, isDelegate: 1 }, function (err, account) {
-				if (err) {
-					return setImmediate(cb, err);
-				}
-
-				if (!account) {
-					return setImmediate(cb, 'Delegate not found');
-				}
-
-				return setImmediate(cb);
-			});
-		}, function (err) {
-			if (err) {
-				return setImmediate(cb, err);
-			}
-
-			var total_votes = (existing_votes + additions) - removals;
-
-			if (total_votes > constants.activeDelegates) {
-				var exceeded = total_votes - constants.activeDelegates;
-
-				return setImmediate(cb, 'Maximum number of ' + constants.activeDelegates + ' votes exceeded (' + exceeded + ' too many)');
-			} else {
-				return setImmediate(cb);
-			}
+			return {
+				action,
+				publicKey: votePublicKey,
+			};
 		});
-	});
+	} catch (e) {
+		library.logger.error(e.stack);
+		return setImmediate(cb, e);
+	}
+
+	async.waterfall(
+		[
+			// get all  public keys of delegates sender has voted for. Confirmed or unconfirmed based on state parameter.
+			function getExistingVotedPublicKeys(waterfallCb) {
+				modules.accounts.getAccount(
+					{ publicKey: senderPublicKey },
+					(err, account) => {
+						if (err) {
+							return setImmediate(waterfallCb, err);
+						}
+
+						if (!account) {
+							return setImmediate(waterfallCb, 'Account not found');
+						}
+
+						const delegates =
+							state === 'confirmed' ? account.delegates : account.u_delegates;
+						const existingVotedPublicKeys = Array.isArray(delegates)
+							? delegates
+							: [];
+
+						return setImmediate(waterfallCb, null, existingVotedPublicKeys);
+					},
+					tx
+				);
+			},
+			// Validate votes in the transaction by checking that sender is not voting for an account already, and also that sender is not unvoting an account it did not vote before.
+			function validateVotes(existingVotedPublicKeys, waterfallCb) {
+				modules.accounts.getAccounts(
+					{
+						publicKey: votesWithAction.map(({ publicKey }) => publicKey),
+						isDelegate: 1,
+						sort: 'address:desc',
+					},
+					(err, votesAccounts) => {
+						if (err) {
+							return setImmediate(waterfallCb, err);
+						}
+
+						if (
+							!votesAccounts ||
+							votesAccounts.length < votesWithAction.length
+						) {
+							library.logger.error(
+								'Delegates with addresses not found',
+								_.differenceWith(
+									votesWithAction,
+									votesAccounts,
+									(
+										{ publicKey: publicKeyFromTransaction },
+										{ publicKey: publicKeyFromAccount }
+									) => publicKeyFromTransaction === publicKeyFromAccount
+								).map(({ publicKey }) => publicKey)
+							);
+							return setImmediate(waterfallCb, 'Delegate not found');
+						}
+						const upvoteAccounts = votesAccounts.filter(voteAccount =>
+							votesWithAction.find(
+								({ action, publicKey }) =>
+									action === '+' && publicKey === voteAccount.publicKey
+							)
+						);
+						const downvoteAccounts = votesAccounts.filter(voteAccount =>
+							votesWithAction.find(
+								({ action, publicKey }) =>
+									action === '-' && publicKey === voteAccount.publicKey
+							)
+						);
+
+						const invalidUpvoteAccounts = _.intersectionWith(
+							upvoteAccounts,
+							existingVotedPublicKeys,
+							({ publicKey: upvoteAccountPublicKey }, existingVotedPublicKey) =>
+								upvoteAccountPublicKey === existingVotedPublicKey
+						);
+
+						if (invalidUpvoteAccounts.length > 0) {
+							return setImmediate(
+								waterfallCb,
+								`Failed to add vote, delegate "${
+									invalidUpvoteAccounts[0].username
+								}" already voted for`
+							);
+						}
+
+						const invalidDownvoteAccounts = _.differenceWith(
+							downvoteAccounts,
+							existingVotedPublicKeys,
+							(
+								{ publicKey: downvoteAccountPubicKey },
+								existingVotedPublicKey
+							) => downvoteAccountPubicKey === existingVotedPublicKey
+						);
+						if (invalidDownvoteAccounts.length > 0) {
+							return setImmediate(
+								waterfallCb,
+								`Failed to remove vote, delegate "${
+									invalidDownvoteAccounts[0].username
+								}" was not voted for`
+							);
+						}
+
+						const existingVotes = existingVotedPublicKeys.length;
+						const upvotes = upvoteAccounts.length;
+						const downvotes = downvoteAccounts.length;
+						const totalVotes = existingVotes + upvotes - downvotes;
+
+						if (totalVotes > ACTIVE_DELEGATES) {
+							const exceeded = totalVotes - ACTIVE_DELEGATES;
+
+							return setImmediate(
+								waterfallCb,
+								`Maximum number of ${ACTIVE_DELEGATES} votes exceeded (${exceeded} too many)`
+							);
+						}
+						return setImmediate(waterfallCb);
+					},
+					tx
+				);
+			},
+		],
+		cb
+	);
 };
 
-__private.loadDelegates = function (cb) {
-	var secrets;
+/**
+ * Loads delegates from config and stores in private `keypairs`.
+ *
+ * @private
+ * @param {function} cb - Callback function
+ * @returns {setImmediateCallback} cb
+ * @todo Add description for the return value
+ */
+__private.loadDelegates = function(cb) {
+	const encryptedList = library.config.forging.delegates;
 
-	if (library.config.forging.secret) {
-		if (Array.isArray(library.config.forging.secret)) {
-			secrets = library.config.forging.secret;
-		} else {
-			secrets = [library.config.forging.secret];
-		}
-	}
-
-	if (!secrets || !secrets.length) {
+	if (
+		!encryptedList ||
+		!encryptedList.length ||
+		!library.config.forging.force ||
+		!library.config.forging.defaultPassword
+	) {
 		return setImmediate(cb);
-	} else {
-		library.logger.info(['Loading', secrets.length, 'delegates from config'].join(' '));
 	}
+	library.logger.info(
+		`Loading ${
+			encryptedList.length
+		} delegates using encrypted passphrases from config`
+	);
 
-	async.eachSeries(secrets, function (secret, cb) {
-		var keypair = library.ed.makeKeypair(crypto.createHash('sha256').update(secret, 'utf8').digest());
-
-		modules.accounts.getAccount({
-			publicKey: keypair.publicKey.toString('hex')
-		}, function (err, account) {
-			if (err) {
-				return setImmediate(cb, err);
+	async.eachSeries(
+		encryptedList,
+		(encryptedItem, seriesCb) => {
+			let passphrase;
+			try {
+				passphrase = __private.decryptPassphrase(
+					encryptedItem.encryptedPassphrase,
+					library.config.forging.defaultPassword
+				);
+			} catch (error) {
+				return setImmediate(
+					seriesCb,
+					`Invalid encryptedPassphrase for publicKey: ${
+						encryptedItem.publicKey
+					}. ${error.message}`
+				);
 			}
 
-			if (!account) {
-				return setImmediate(cb, ['Account with public key:', keypair.publicKey.toString('hex'), 'not found'].join(' '));
+			const keypair = library.ed.makeKeypair(
+				crypto
+					.createHash('sha256')
+					.update(passphrase, 'utf8')
+					.digest()
+			);
+
+			if (keypair.publicKey.toString('hex') !== encryptedItem.publicKey) {
+				return setImmediate(
+					seriesCb,
+					`Invalid encryptedPassphrase for publicKey: ${
+						encryptedItem.publicKey
+					}. Public keys do not match`
+				);
 			}
 
-			if (account.isDelegate) {
-				__private.keypairs[keypair.publicKey.toString('hex')] = keypair;
-				library.logger.info(['Forging enabled on account:', account.address].join(' '));
-			} else {
-				library.logger.warn(['Account with public key:', keypair.publicKey.toString('hex'), 'is not a delegate'].join(' '));
-			}
+			modules.accounts.getAccount(
+				{
+					publicKey: keypair.publicKey.toString('hex'),
+				},
+				(err, account) => {
+					if (err) {
+						return setImmediate(seriesCb, err);
+					}
 
-			return setImmediate(cb);
-		});
-	}, cb);
+					if (!account) {
+						return setImmediate(
+							seriesCb,
+							`Account with public key: ${keypair.publicKey.toString(
+								'hex'
+							)} not found`
+						);
+					}
+
+					if (account.isDelegate) {
+						__private.keypairs[keypair.publicKey.toString('hex')] = keypair;
+						library.logger.info(
+							`Forging enabled on account: ${account.address}`
+						);
+					} else {
+						library.logger.warn(
+							`Account with public key: ${keypair.publicKey.toString(
+								'hex'
+							)} is not a delegate`
+						);
+					}
+
+					return setImmediate(seriesCb);
+				}
+			);
+		},
+		cb
+	);
 };
 
 // Public methods
-Delegates.prototype.generateDelegateList = function (height, cb) {
-	__private.getKeysSortByVote(function (err, truncDelegateList) {
+/**
+ * Updates the forging status of an account, valid actions are enable and disable.
+ *
+ * @param {publicKey} publicKey - Public key of delegate
+ * @param {string} password - Password used to decrypt encrypted passphrase
+ * @param {boolean} forging - Forging status of a delegate to update
+ * @param {function} cb - Callback function
+ * @returns {setImmediateCallback} cb
+ * @todo Add description for the return value
+ */
+Delegates.prototype.updateForgingStatus = function(
+	publicKey,
+	password,
+	forging,
+	cb
+) {
+	const encryptedList = library.config.forging.delegates;
+	const encryptedItem = encryptedList.find(
+		item => item.publicKey === publicKey
+	);
+
+	let keypair;
+	let passphrase;
+
+	if (encryptedItem) {
+		try {
+			passphrase = __private.decryptPassphrase(
+				encryptedItem.encryptedPassphrase,
+				password
+			);
+		} catch (e) {
+			return setImmediate(cb, 'Invalid password and public key combination');
+		}
+
+		keypair = library.ed.makeKeypair(
+			crypto
+				.createHash('sha256')
+				.update(passphrase, 'utf8')
+				.digest()
+		);
+	} else {
+		return setImmediate(cb, `Delegate with publicKey: ${publicKey} not found`);
+	}
+
+	if (keypair.publicKey.toString('hex') !== publicKey) {
+		return setImmediate(cb, 'Invalid password and public key combination');
+	}
+
+	modules.accounts.getAccount(
+		{ publicKey: keypair.publicKey.toString('hex') },
+		(err, account) => {
+			if (err) {
+				return setImmediate(cb, err);
+			}
+
+			if (account && account.isDelegate) {
+				if (forging) {
+					__private.keypairs[keypair.publicKey.toString('hex')] = keypair;
+					library.logger.info(`Forging enabled on account: ${account.address}`);
+				} else {
+					delete __private.keypairs[keypair.publicKey.toString('hex')];
+					library.logger.info(
+						`Forging disabled on account: ${account.address}`
+					);
+				}
+
+				return setImmediate(cb, null, {
+					publicKey,
+					forging,
+				});
+			}
+			return setImmediate(cb, 'Delegate not found');
+		}
+	);
+};
+
+/**
+ * Gets delegate list based on input function by vote and changes order.
+ *
+ * @param {number} round
+ * @param {function} source - Source function for get delegates
+ * @param {function} cb - Callback function
+ * @param {Object} tx - Database transaction/task object
+ * @returns {setImmediateCallback} cb, err, truncated delegate list
+ * @todo Add description for the params
+ */
+Delegates.prototype.generateDelegateList = function(round, source, cb, tx) {
+	// Set default function for getting delegates
+	source = source || __private.getKeysSortByVote;
+
+	source((err, truncDelegateList) => {
 		if (err) {
 			return setImmediate(cb, err);
 		}
 
-		var seedSource = modules.rounds.calc(height).toString();
-		var currentSeed = crypto.createHash('sha256').update(seedSource, 'utf8').digest();
+		const seedSource = round.toString();
+		let currentSeed = crypto
+			.createHash('sha256')
+			.update(seedSource, 'utf8')
+			.digest();
 
-		for (var i = 0, delCount = truncDelegateList.length; i < delCount; i++) {
-			for (var x = 0; x < 4 && i < delCount; i++, x++) {
-				var newIndex = currentSeed[x] % delCount;
-				var b = truncDelegateList[newIndex];
+		for (let i = 0, delCount = truncDelegateList.length; i < delCount; i++) {
+			for (let x = 0; x < 4 && i < delCount; i++, x++) {
+				const newIndex = currentSeed[x] % delCount;
+				const b = truncDelegateList[newIndex];
 				truncDelegateList[newIndex] = truncDelegateList[i];
 				truncDelegateList[i] = b;
 			}
-			currentSeed = crypto.createHash('sha256').update(currentSeed).digest();
+			currentSeed = crypto
+				.createHash('sha256')
+				.update(currentSeed)
+				.digest();
 		}
 
 		return setImmediate(cb, null, truncDelegateList);
-	});
+	}, tx);
 };
 
-Delegates.prototype.getDelegates = function (query, cb) {
-	if (!query) {
-		throw 'Missing query argument';
+/**
+ * Generates delegate list and checks if block generator public key matches delegate id.
+ *
+ * @param {block} block
+ * @param {function} cb - Callback function
+ * @returns {setImmediateCallback} cb, err
+ * @todo Add description for the params
+ */
+Delegates.prototype.validateBlockSlot = function(block, cb) {
+	__private.validateBlockSlot(block, __private.getKeysSortByVote, cb);
+};
+
+/**
+ * Generates delegate list and checks if block generator public key matches delegate id - against previous round.
+ *
+ * @param {block} block
+ * @param {function} cb - Callback function
+ * @returns {setImmediateCallback} cb, err
+ * @todo Add description for the params
+ */
+Delegates.prototype.validateBlockSlotAgainstPreviousRound = function(
+	block,
+	cb
+) {
+	__private.validateBlockSlot(
+		block,
+		__private.getDelegatesFromPreviousRound,
+		cb
+	);
+};
+
+/**
+ * Gets a list of delegates:
+ * - Calculating individual rank, approval, productivity.
+ * - Sorting based on query parameter.
+ *
+ * @param {Object} query
+ * @param {function} cb - Callback function
+ * @returns {setImmediateCallback} cb, err, object with ordered delegates, offset, count, limit
+ * @todo Sort does not affect data? What is the impact?
+ */
+Delegates.prototype.getDelegates = function(query, cb) {
+	if (!_.isObject(query)) {
+		throw 'Invalid query argument, expected object';
 	}
-	modules.accounts.getAccounts({
-		isDelegate: 1,
-		sort: { 'vote': -1, 'publicKey': 1 }
-	}, ['username', 'address', 'publicKey', 'vote', 'missedblocks', 'producedblocks'], function (err, delegates) {
+	if (query.search) {
+		query.username = { $like: `%${query.search}%` };
+		delete query.search;
+	}
+	query.isDelegate = 1;
+	modules.accounts.getAccounts(
+		query,
+		[
+			'username',
+			'address',
+			'publicKey',
+			'vote',
+			'rewards',
+			'producedBlocks',
+			'missedBlocks',
+			'secondPublicKey',
+			'rank',
+			'approval',
+			'productivity',
+		],
+		(err, delegates) => setImmediate(cb, err, delegates)
+	);
+};
+
+/**
+ * Gets a list forgers based on query parameters.
+ *
+ * @param {Object} query - Query object
+ * @param {int} query.limit - Limit applied to results
+ * @param {int} query.offset - Offset value for results
+ * @param {function} cb - Callback function
+ * @returns {setImmediateCallback} cb, err, object
+ */
+Delegates.prototype.getForgers = function(query, cb) {
+	query.limit = query.limit || 10;
+	query.offset = query.offset || 0;
+
+	const currentBlock = modules.blocks.lastBlock.get();
+	const currentSlot = slots.getSlotNumber();
+	const forgerKeys = [];
+
+	// We calculate round using height + 1, because we want the list to be generated for next block - it will be passed as seed for generating the list
+	// For example: last block height is 101 (still round 1, but already finished), then we want the list for round 2 (height 102)
+	const round = slots.calcRound(currentBlock.height + 1);
+
+	self.generateDelegateList(round, null, (err, activeDelegates) => {
 		if (err) {
 			return setImmediate(cb, err);
 		}
 
-		var limit = query.limit || constants.activeDelegates;
-		var offset = query.offset || 0;
-		var active = query.active;
-
-		limit = limit > constants.activeDelegates ? constants.activeDelegates : limit;
-
-		var count = delegates.length;
-		var length = Math.min(limit, count);
-		var realLimit = Math.min(offset + limit, count);
-
-		var lastBlock   = modules.blocks.getLastBlock(),
-		    totalSupply = __private.blockReward.calcSupply(lastBlock.height);
-
-		for (var i = 0; i < delegates.length; i++) {
-			delegates[i].rate = i + 1;
-			delegates[i].approval = (delegates[i].vote / totalSupply) * 100;
-			delegates[i].approval = Math.round(delegates[i].approval * 1e2) / 1e2;
-
-			var percent = 100 - (delegates[i].missedblocks / ((delegates[i].producedblocks + delegates[i].missedblocks) / 100));
-			percent = Math.abs(percent) || 0;
-
-			var outsider = i + 1 > slots.delegates;
-			delegates[i].productivity = (!outsider) ? Math.round(percent * 1e2) / 1e2 : 0;
+		for (
+			let i = query.offset + 1;
+			i <= ACTIVE_DELEGATES && i <= query.limit + query.offset;
+			i++
+		) {
+			if (activeDelegates[(currentSlot + i) % ACTIVE_DELEGATES]) {
+				forgerKeys.push(activeDelegates[(currentSlot + i) % ACTIVE_DELEGATES]);
+			}
 		}
 
-		var orderBy = OrderBy(query.orderBy, {quoteField: false});
-
-		if (orderBy.error) {
-			return setImmediate(cb, orderBy.error);
-		}
-
-		return setImmediate(cb, null, {
-			delegates: delegates,
-			sortField: orderBy.sortField,
-			sortMethod: orderBy.sortMethod,
-			count: count,
-			offset: offset,
-			limit: realLimit
-		});
+		library.db.delegates
+			.getDelegatesByPublicKeys(forgerKeys)
+			.then(rows => {
+				rows.forEach(forger => {
+					forger.nextSlot =
+						forgerKeys.indexOf(forger.publicKey) + currentSlot + 1;
+				});
+				rows = _.sortBy(rows, 'nextSlot');
+				return setImmediate(cb, null, rows);
+			})
+			.catch(error => setImmediate(cb, error));
 	});
 };
 
-Delegates.prototype.checkConfirmedDelegates = function (publicKey, votes, cb) {
-	return __private.checkDelegates(publicKey, votes, 'confirmed', cb);
+/**
+ * Description of checkConfirmedDelegates.
+ *
+ * @param {publicKey} publicKey
+ * @param {Array} votes
+ * @param {function} cb
+ * @returns {function} Calls checkDelegates() with 'confirmed' state
+ * @todo Add description for the params
+ */
+Delegates.prototype.checkConfirmedDelegates = function(
+	publicKey,
+	votes,
+	cb,
+	tx
+) {
+	return __private.checkDelegates(publicKey, votes, 'confirmed', cb, tx);
 };
 
-Delegates.prototype.checkUnconfirmedDelegates = function (publicKey, votes, cb) {
-	return __private.checkDelegates(publicKey, votes, 'unconfirmed', cb);
+/**
+ * Description of checkUnconfirmedDelegates.
+ *
+ * @param {publicKey} publicKey
+ * @param {Array} votes
+ * @param {function} cb
+ * @returns {function} Calls checkDelegates() with 'unconfirmed' state
+ * @todo Add description for the params
+ */
+Delegates.prototype.checkUnconfirmedDelegates = function(
+	publicKey,
+	votes,
+	cb,
+	tx
+) {
+	return __private.checkDelegates(publicKey, votes, 'unconfirmed', cb, tx);
 };
 
-Delegates.prototype.fork = function (block, cause) {
+/**
+ * Inserts a fork into 'forks_stat' table and emits a 'delegates/fork' socket signal with fork data: cause + block.
+ *
+ * @param {block} block
+ * @param {string} cause
+ * @todo Add description for the params
+ */
+Delegates.prototype.fork = function(block, cause) {
 	library.logger.info('Fork', {
 		delegate: block.generatorPublicKey,
-		block: { id: block.id, timestamp: block.timestamp, height: block.height, previousBlock: block.previousBlock },
-		cause: cause
+		block: {
+			id: block.id,
+			timestamp: block.timestamp,
+			height: block.height,
+			previousBlock: block.previousBlock,
+		},
+		cause,
 	});
 
-	var fork = {
+	const fork = {
 		delegatePublicKey: block.generatorPublicKey,
 		blockTimestamp: block.timestamp,
 		blockId: block.id,
 		blockHeight: block.height,
 		previousBlock: block.previousBlock,
-		cause: cause
+		cause,
 	};
 
-	library.db.none(sql.insertFork, fork).then(function () {
+	library.db.delegates.insertFork(fork).then(() => {
 		library.network.io.sockets.emit('delegates/fork', fork);
 	});
 };
 
-Delegates.prototype.validateBlockSlot = function (block, cb) {
-	self.generateDelegateList(block.height, function (err, activeDelegates) {
-		if (err) {
-			return setImmediate(cb, err);
-		}
-
-		var currentSlot = slots.getSlotNumber(block.timestamp);
-		var delegate_id = activeDelegates[currentSlot % slots.delegates];
-		// var nextDelegate_id = activeDelegates[(currentSlot + 1) % slots.delegates];
-		// var previousDelegate_id = activeDelegates[(currentSlot - 1) % slots.delegates];
-
-		if (delegate_id && block.generatorPublicKey === delegate_id) {
-			return setImmediate(cb);
-		} else {
-			library.logger.error('Expected generator: ' + delegate_id + ' Received generator: ' + block.generatorPublicKey);
-			return setImmediate(cb, 'Failed to verify slot: ' + currentSlot);
-		}
-	});
-};
-
-Delegates.prototype.sandboxApi = function (call, args, cb) {
-	sandboxHelper.callMethod(shared, call, args, cb);
+/**
+ * Get an object of key pairs for delegates enabled for forging.
+ *
+ * @returns {object} Of delegate key pairs
+ */
+Delegates.prototype.getForgersKeyPairs = function() {
+	return __private.keypairs;
 };
 
 // Events
-Delegates.prototype.onBind = function (scope) {
-	modules = scope;
+/**
+ * Calls Delegate.bind() with scope.
+ *
+ * @param {modules} scope - Loaded modules
+ */
+Delegates.prototype.onBind = function(scope) {
+	modules = {
+		accounts: scope.accounts,
+		blocks: scope.blocks,
+		delegates: scope.delegates,
+		loader: scope.loader,
+		peers: scope.peers,
+		rounds: scope.rounds,
+		transactions: scope.transactions,
+		transport: scope.transport,
+	};
 
-	__private.assetTypes[transactionTypes.DELEGATE].bind({
-		modules: modules, library: library
-	});
+	__private.assetTypes[transactionTypes.DELEGATE].bind(scope.accounts);
 };
 
-Delegates.prototype.onBlockchainReady = function () {
+/**
+ * Forge the next block and then fill the transaction pool.
+ * Registered by jobs queue every __private.forgeInterval.
+ *
+ * @private
+ * @param {function} cb - Callback function
+ */
+__private.nextForge = function(cb) {
+	async.series([modules.transactions.fillPool, __private.forge], cb);
+};
+
+/**
+ * Loads delegates.
+ */
+Delegates.prototype.onBlockchainReady = function() {
 	__private.loaded = true;
 
-	__private.loadDelegates(function nextForge (err) {
+	__private.loadDelegates(err => {
 		if (err) {
 			library.logger.error('Failed to load delegates', err);
 		}
 
-		async.series([
-			__private.forge,
-			modules.transactions.fillPool
-		], function (err) {
-			return setTimeout(nextForge, 1000);
-		});
+		jobsQueue.register(
+			'delegatesNextForge',
+			cb => {
+				library.sequence.add(sequenceCb => {
+					__private.nextForge(sequenceCb);
+				}, cb);
+			},
+			__private.forgeInterval
+		);
 	});
 };
 
-Delegates.prototype.cleanup = function (cb) {
+/**
+ * Sets loaded to false.
+ *
+ * @param {function} cb - Callback function
+ * @returns {setImmediateCallback} cb
+ */
+Delegates.prototype.cleanup = function(cb) {
 	__private.loaded = false;
 	return setImmediate(cb);
 };
 
-// Private
+/**
+ * Checks if `modules` is loaded.
+ *
+ * @returns {boolean} True if `modules` is loaded
+ */
+Delegates.prototype.isLoaded = function() {
+	return !!modules;
+};
 
-// Shared
-shared.getDelegate = function (req, cb) {
-	library.schema.validate(req.body, schema.getDelegate, function (err) {
-		if (err) {
-			return setImmediate(cb, err[0].message);
-		}
+// Shared API
+/**
+ * Description of the member.
+ *
+ * @property {function} getForgers - Search forgers based on the query parameters passed
+ * @property {function} getDelegates - Search accounts based on the query parameters passed
+ * @todo Add description for getGenesis function
+ * @todo Implement API comments with apidoc
+ * @see {@link http://apidocjs.com/}
+ */
+Delegates.prototype.shared = {
+	/**
+	 * Search forgers based on the query parameters passed.
+	 *
+	 * @param {Object} filters - Filters applied to results
+	 * @param {int} filters.limit - Limit applied to results
+	 * @param {int} filters.offset - Offset value for results
+	 * @param {function} cb - Callback function
+	 * @returns {setImmediateCallback} cb
+	 * @todo Add description for the return value
+	 */
+	getForgers(filters, cb) {
+		const lastBlock = modules.blocks.lastBlock.get();
+		const lastBlockSlot = slots.getSlotNumber(lastBlock.timestamp);
+		const currentSlot = slots.getSlotNumber();
 
-		modules.delegates.getDelegates(req.body, function (err, data) {
+		modules.delegates.getForgers(filters, (err, forgers) => {
 			if (err) {
-				return setImmediate(cb, err);
+				return setImmediate(
+					cb,
+					new ApiError(err, apiCodes.INTERNAL_SERVER_ERROR)
+				);
 			}
 
-			var delegate = _.find(data.delegates, function (delegate) {
-				if (req.body.publicKey) {
-					return delegate.publicKey === req.body.publicKey;
-				} else if (req.body.username) {
-					return delegate.username === req.body.username;
-				}
-
-				return false;
+			return setImmediate(cb, null, {
+				data: forgers,
+				meta: {
+					lastBlock: lastBlock.height,
+					lastBlockSlot,
+					currentSlot,
+				},
 			});
-
-			if (delegate) {
-				return setImmediate(cb, null, {delegate: delegate});
-			} else {
-				return setImmediate(cb, 'Delegate not found');
-			}
 		});
-	});
-};
+	},
 
-shared.getNextForgers = function (req, cb) {
-	var currentBlock = modules.blocks.getLastBlock ();
-	var limit = req.body.limit || 10;
-
-	modules.delegates.generateDelegateList(currentBlock.height, function (err, activeDelegates) {
-		if (err) {
-			return setImmediate(cb, err);
-		}
-
-		var currentBlockSlot = slots.getSlotNumber(currentBlock.timestamp);
-		var currentSlot = slots.getSlotNumber();
-		var nextForgers = [];
-
-		for (var i = 1; i <= slots.delegates && i <= limit; i++) {
-			if (activeDelegates[(currentSlot + i) % slots.delegates]) {
-				nextForgers.push (activeDelegates[(currentSlot + i) % slots.delegates]);
-			}
-		}
-		return setImmediate(cb, null, {currentBlock: currentBlock.height, currentBlockSlot: currentBlockSlot, currentSlot: currentSlot, delegates: nextForgers});
-	});
-};
-
-shared.search = function (req, cb) {
-	library.schema.validate(req.body, schema.search, function (err) {
-		if (err) {
-			return setImmediate(cb, err[0].message);
-		}
-
-		var orderBy = OrderBy(
-			req.body.orderBy, {
-				sortFields: sql.sortFields,
-				sortField: 'username'
-			}
-		);
-
-		if (orderBy.error) {
-			return setImmediate(cb, orderBy.error);
-		}
-
-		library.db.query(sql.search({
-			q: req.body.q,
-			limit: req.body.limit || 100,
-			sortField: orderBy.sortField,
-			sortMethod: orderBy.sortMethod
-		})).then(function (rows) {
-			return setImmediate(cb, null, {delegates: rows});
-		}).catch(function (err) {
-			library.logger.error(err.stack);
-			return setImmediate(cb, 'Database search failed');
-		});
-	});
-};
-
-shared.count = function (req, cb) {
-	library.db.one(sql.count).then(function (row) {
-		return setImmediate(cb, null, { count: row.count });
-	}).catch(function (err) {
-		library.logger.error(err.stack);
-		return setImmediate(cb, 'Failed to count delegates');
-	});
-};
-
-shared.getVoters = function (req, cb) {
-	library.schema.validate(req.body, schema.getVoters, function (err) {
-		if (err) {
-			return setImmediate(cb, err[0].message);
-		}
-
-		library.db.one(sql.getVoters, { publicKey: req.body.publicKey }).then(function (row) {
-			var addresses = (row.accountIds) ? row.accountIds : [];
-
-			modules.accounts.getAccounts({
-				address: { $in: addresses },
-				sort: 'balance'
-			}, ['address', 'balance', 'username', 'publicKey'], function (err, rows) {
-				if (err) {
-					return setImmediate(cb, err);
-				}
-
-				return setImmediate(cb, null, {accounts: rows});
-			});
-		}).catch(function (err) {
-			library.logger.error(err.stack);
-			return setImmediate(cb, 'Failed to get voters for delegate: ' + req.body.publicKey);
-		});
-	});
-};
-
-shared.getDelegates = function (req, cb) {
-	library.schema.validate(req.body, schema.getDelegates, function (err) {
-		if (err) {
-			return setImmediate(cb, err[0].message);
-		}
-
-		modules.delegates.getDelegates(req.body, function (err, data) {
+	/**
+	 * Search accounts based on the query parameters passed.
+	 *
+	 * @param {Object} filters - Filters applied to results
+	 * @param {string} filters.address - Account address
+	 * @param {string} filters.publicKey - Public key associated to account
+	 * @param {string} filters.secondPublicKey - Second public key associated to account
+	 * @param {string} filters.username - Username associated to account
+	 * @param {string} filters.sort - Field to sort results by
+	 * @param {string} filters.search - Field to sort results by
+	 * @param {string} filters.rank - Field to sort results by
+	 * @param {int} filters.limit - Limit applied to results
+	 * @param {int} filters.offset - Offset value for results
+	 * @param {function} cb - Callback function
+	 * @returns {setImmediateCallback} cb
+	 * @todo Add description for the return value
+	 */
+	getDelegates(filters, cb) {
+		modules.delegates.getDelegates(filters, (err, delegates) => {
 			if (err) {
-				return setImmediate(cb, err);
+				return setImmediate(
+					cb,
+					new ApiError(err, apiCodes.INTERNAL_SERVER_ERROR)
+				);
 			}
-
-			function compareNumber (a, b) {
-				var sorta = parseFloat(a[data.sortField]);
-				var sortb = parseFloat(b[data.sortField]);
-				if (data.sortMethod === 'ASC') {
-					return sorta - sortb;
-				} else {
-				 	return sortb - sorta;
-				}
-			}
-
-			function compareString (a, b) {
-				var sorta = a[data.sortField];
-				var sortb = b[data.sortField];
-				if (data.sortMethod === 'ASC') {
-				  return sorta.localeCompare(sortb);
-				} else {
-				  return sortb.localeCompare(sorta);
-				}
-			}
-
-			if (data.sortField) {
-				if (['approval', 'productivity', 'rate', 'vote'].indexOf(data.sortField) > -1) {
-					data.delegates = data.delegates.sort(compareNumber);
-				} else if (['username', 'address', 'publicKey'].indexOf(data.sortField) > -1) {
-					data.delegates = data.delegates.sort(compareString);
-				} else {
-					return setImmediate(cb, 'Invalid sort field');
-				}
-			}
-
-			var delegates = data.delegates.slice(data.offset, data.limit);
-
-			return setImmediate(cb, null, {delegates: delegates, totalCount: data.count});
+			return setImmediate(cb, null, delegates);
 		});
-	});
-};
+	},
 
-shared.getFee = function (req, cb) {
-	return setImmediate(cb, null, {fee: constants.fees.delegate});
-};
-
-shared.getForgedByAccount = function (req, cb) {
-	library.schema.validate(req.body, schema.getForgedByAccount, function (err) {
-		if (err) {
-			return setImmediate(cb, err[0].message);
-		}
-
-		if (req.body.start !== undefined || req.body.end !== undefined) {
-			modules.blocks.aggregateBlocksReward({generatorPublicKey: req.body.generatorPublicKey, start: req.body.start, end: req.body.end}, function (err, reward) {
-				if (err) {
-					return setImmediate(cb, err);
-				}
-				var forged = bignum(reward.fees).plus(bignum(reward.rewards)).toString();
-				return setImmediate(cb, null, {fees: reward.fees, rewards: reward.rewards, forged: forged, count: reward.count});
-			});
-		} else {
-			modules.accounts.getAccount({publicKey: req.body.generatorPublicKey}, ['fees', 'rewards'], function (err, account) {
-				if (err || !account) {
-					return setImmediate(cb, err || 'Account not found');
-				}
-				var forged = bignum(account.fees).plus(bignum(account.rewards)).toString();
-				return setImmediate(cb, null, {fees: account.fees, rewards: account.rewards, forged: forged});
-			});
-		}
-	});
-};
-
-shared.addDelegate = function (req, cb) {
-	library.schema.validate(req.body, schema.addDelegate, function (err) {
-		if (err) {
-			return setImmediate(cb, err[0].message);
-		}
-
-		var hash = crypto.createHash('sha256').update(req.body.secret, 'utf8').digest();
-		var keypair = library.ed.makeKeypair(hash);
-
-		if (req.body.publicKey) {
-			if (keypair.publicKey.toString('hex') !== req.body.publicKey) {
-				return setImmediate(cb, 'Invalid passphrase');
-			}
-		}
-
-		library.balancesSequence.add(function (cb) {
-			if (req.body.multisigAccountPublicKey && req.body.multisigAccountPublicKey !== keypair.publicKey.toString('hex')) {
-				modules.accounts.getAccount({publicKey: req.body.multisigAccountPublicKey}, function (err, account) {
+	/**
+	 *
+	 * @param {Object} filters - Filters applied to results
+	 * @param {string} filters.address - Address of the delegate
+	 * @param {string} filters.start - Start time to aggregate
+	 * @param {string} filters.end - End time to aggregate
+	 * @params {function} cb - Callback function
+	 * @param {SetImmediateCallback} cb
+	 */
+	getForgingStatistics(filters, cb) {
+		// If need to aggregate all data then just fetch from the account
+		if (!filters.start && !filters.end) {
+			// TODO: Need to move modules.delegates.getDelegates after adding "fees" in its list
+			modules.accounts.getAccount(
+				{ address: filters.address },
+				['rewards', 'fees', 'producedBlocks', 'isDelegate'],
+				(err, delegate) => {
 					if (err) {
 						return setImmediate(cb, err);
 					}
 
-					if (!account || !account.publicKey) {
-						return setImmediate(cb, 'Multisignature account not found');
-					}
-
-					if (!account.multisignatures || !account.multisignatures) {
-						return setImmediate(cb, 'Account does not have multisignatures enabled');
-					}
-
-					if (account.multisignatures.indexOf(keypair.publicKey.toString('hex')) < 0) {
-						return setImmediate(cb, 'Account does not belong to multisignature group');
-					}
-
-					modules.accounts.getAccount({publicKey: keypair.publicKey}, function (err, requester) {
-						if (err) {
-							return setImmediate(cb, err);
-						}
-
-						if (!requester || !requester.publicKey) {
-							return setImmediate(cb, 'Requester not found');
-						}
-
-						if (requester.secondSignature && !req.body.secondSecret) {
-							return setImmediate(cb, 'Missing requester second passphrase');
-						}
-
-						if (requester.publicKey === account.publicKey) {
-							return setImmediate(cb, 'Invalid requester public key');
-						}
-
-						var secondKeypair = null;
-
-						if (requester.secondSignature) {
-							var secondHash = crypto.createHash('sha256').update(req.body.secondSecret, 'utf8').digest();
-							secondKeypair = library.ed.makeKeypair(secondHash);
-						}
-
-						var transaction;
-
-						try {
-							transaction = library.logic.transaction.create({
-								type: transactionTypes.DELEGATE,
-								username: req.body.username,
-								sender: account,
-								keypair: keypair,
-								secondKeypair: secondKeypair,
-								requester: keypair
-							});
-						} catch (e) {
-							return setImmediate(cb, e.toString());
-						}
-						modules.transactions.receiveTransactions([transaction], true, cb);
-					});
-				});
-			} else {
-				modules.accounts.setAccountAndGet({publicKey: keypair.publicKey.toString('hex')}, function (err, account) {
-					if (err) {
-						return setImmediate(cb, err);
-					}
-
-					if (!account || !account.publicKey) {
+					if (!delegate) {
 						return setImmediate(cb, 'Account not found');
 					}
 
-					if (account.secondSignature && !req.body.secondSecret) {
-						return setImmediate(cb, 'Invalid second passphrase');
+					if (!delegate.isDelegate) {
+						return setImmediate(cb, 'Account is not a delegate');
 					}
 
-					var secondKeypair = null;
+					return setImmediate(cb, null, {
+						rewards: delegate.rewards,
+						fees: delegate.fees,
+						count: new Bignum(delegate.producedBlocks).toString(),
+						forged: new Bignum(delegate.rewards)
+							.plus(new Bignum(delegate.fees))
+							.toString(),
+					});
+				}
+			);
 
-					if (account.secondSignature) {
-						var secondHash = crypto.createHash('sha256').update(req.body.secondSecret, 'utf8').digest();
-						secondKeypair = library.ed.makeKeypair(secondHash);
-					}
+			// If need to aggregate some period of time
+		} else {
+			modules.blocks.utils.aggregateBlocksReward(filters, (err, reward) => {
+				if (err) {
+					return setImmediate(cb, err);
+				}
 
-					var transaction;
+				reward.forged = new Bignum(reward.fees)
+					.plus(new Bignum(reward.rewards))
+					.toString();
 
-					try {
-						transaction = library.logic.transaction.create({
-							type: transactionTypes.DELEGATE,
-							username: req.body.username,
-							sender: account,
-							keypair: keypair,
-							secondKeypair: secondKeypair
-						});
-					} catch (e) {
-						return setImmediate(cb, e.toString());
-					}
-					modules.transactions.receiveTransactions([transaction], true, cb);
-				});
-			}
-		}, function (err, transaction) {
-			if (err) {
-				return setImmediate(cb, err);
-			}
-
-			return setImmediate(cb, null, {transaction: transaction[0]});
-		});
-	});
+				return setImmediate(cb, null, reward);
+			});
+		}
+	},
 };
 
 // Export
