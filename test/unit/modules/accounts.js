@@ -1,4 +1,3 @@
-/* eslint-disable mocha/no-skipped-tests */
 /*
  * Copyright © 2018 Lisk Foundation
  *
@@ -15,12 +14,13 @@
 
 'use strict';
 
-var Bignum = require('../../../helpers/bignum.js');
-var AccountModule = require('../../../modules/accounts.js');
-var randomUtil = require('../../common/utils/random');
-var application = require('../../common/application');
+const Bignum = require('../../../helpers/bignum.js');
+const AccountModule = require('../../../modules/accounts.js');
+const accountFixtures = require('../../fixtures').accounts;
+const randomUtil = require('../../common/utils/random');
+const application = require('../../common/application');
 
-var validAccount = {
+const validAccount = {
 	username: 'genesis_100',
 	isDelegate: 1,
 	u_isDelegate: 1,
@@ -50,8 +50,9 @@ var validAccount = {
 };
 
 describe('accounts', () => {
-	var accounts;
-	var accountLogic;
+	let accounts;
+	let accountLogic;
+	let db;
 
 	before(done => {
 		application.init(
@@ -61,6 +62,7 @@ describe('accounts', () => {
 				scope.modules.blocks.lastBlock.set({ height: 10 });
 				accounts = scope.modules.accounts;
 				accountLogic = scope.logic.account;
+				db = scope.db;
 				done(err);
 			}
 		);
@@ -85,19 +87,21 @@ describe('accounts', () => {
 			).to.equal(validAccount.address);
 		});
 
+		/* eslint-disable mocha/no-skipped-tests */
 		// TODO: Design a throwable test
 		it.skip('should throw error for invalid publicKey', () => {
-			var invalidPublicKey = 'invalidPublicKey';
+			const invalidPublicKey = 'invalidPublicKey';
 
 			return expect(() => {
 				accounts.generateAddressByPublicKey(invalidPublicKey);
 			}).to.throw('Invalid public key: ', invalidPublicKey);
 		});
+		/* eslint-enable mocha/no-skipped-tests */
 	});
 
 	describe('getAccount', () => {
 		it('should convert publicKey filter to address and call account.get', done => {
-			var getAccountStub = sinonSandbox.stub(accountLogic, 'get');
+			const getAccountStub = sinonSandbox.stub(accountLogic, 'get');
 
 			accounts.getAccount({ publicKey: validAccount.publicKey });
 			expect(getAccountStub.calledOnce).to.be.ok;
@@ -123,17 +127,13 @@ describe('accounts', () => {
 			accounts.getAccounts({ secondSignature: 0 }, (err, res) => {
 				expect(err).to.not.exist;
 				expect(res).to.be.an('Array');
-				expect(
-					res.filter(a => {
-						return a.secondSignature != 0;
-					}).length
-				).to.equal(0);
+				expect(res.filter(a => a.secondSignature !== false).length).to.equal(0);
 				done();
 			});
 		});
 
 		it('should internally call logic/account.getAll method', done => {
-			var getAllSpy = sinonSandbox.spy(accountLogic, 'getAll');
+			const getAllSpy = sinonSandbox.spy(accountLogic, 'getAll');
 
 			accounts.getAccounts({ address: validAccount.address }, (err, res) => {
 				expect(err).to.not.exist;
@@ -144,6 +144,98 @@ describe('accounts', () => {
 				getAllSpy.restore();
 				done();
 			});
+		});
+	});
+
+	describe('setAccountAndGet', () => {
+		it('should fail if address and publicKey is missing', done => {
+			const account = new accountFixtures.Account();
+
+			delete account.address;
+			delete account.publicKey;
+
+			accounts.setAccountAndGet(account, (error, data) => {
+				expect(error).to.be.eql('Invalid public key');
+				expect(data).to.be.undefined;
+				done();
+			});
+		});
+
+		it('should set and get account when sending address but no publicKey', done => {
+			const account = new accountFixtures.Account();
+
+			delete account.publicKey;
+
+			accounts.setAccountAndGet(account, (error, data) => {
+				expect(error).to.be.null;
+				expect(data.address).to.be.eql(account.address);
+				expect(data.publicKey).to.not.exist;
+				done();
+			});
+		});
+
+		it('should set and get account with address when publicKey is provided but address is not provided', done => {
+			const account = new accountFixtures.Account();
+
+			delete account.address;
+
+			accounts.setAccountAndGet(account, (error, data) => {
+				expect(error).to.be.null;
+				expect(data.publicKey).to.be.eql(account.publicKey);
+				expect(data.address).to.exist;
+				done();
+			});
+		});
+
+		it('should set and get account using `Accounts:setAccountAndGet` database transaction with txLevel = 0', done => {
+			const account = new accountFixtures.Account();
+			let eventCtx;
+
+			db.$config.options.query = function(event) {
+				eventCtx = event.ctx;
+			};
+
+			accounts.setAccountAndGet(account, (error, data) => {
+				expect(error).to.be.null;
+				expect(data.address).to.be.eql(account.address);
+
+				expect(eventCtx).to.not.null;
+				expect(eventCtx.isTX).to.be.true;
+				expect(eventCtx.txLevel).to.be.eql(0);
+				expect(eventCtx.tag).to.be.eql('Accounts:setAccountAndGet');
+				delete db.$config.options.query;
+
+				done();
+			});
+		});
+
+		it('should set and get account using `Tests:setAccountAndGet` database transaction with txLevel = 0', done => {
+			const account = new accountFixtures.Account();
+			let eventCtx;
+
+			db.$config.options.query = function(event) {
+				eventCtx = event.ctx;
+			};
+
+			const task = t =>
+				accounts.setAccountAndGet(
+					account,
+					(error, data) => {
+						expect(error).to.be.null;
+						expect(data.address).to.be.eql(account.address);
+
+						expect(eventCtx).to.not.null;
+						expect(eventCtx.isTX).to.be.true;
+						expect(eventCtx.txLevel).to.be.eql(0);
+						expect(eventCtx.tag).to.be.eql('Tests:setAccountAndGet');
+						delete db.$config.options.query;
+
+						done();
+					},
+					t
+				);
+
+			db.tx('Tests:setAccountAndGet', task);
 		});
 	});
 
@@ -203,8 +295,8 @@ describe('accounts', () => {
 			});
 
 			it('should return top 10 accounts ordered by descending balance', done => {
-				var limit = 10;
-				var sort = 'balance:desc';
+				const limit = 10;
+				const sort = 'balance:desc';
 
 				accounts.shared.getAccounts(
 					{
@@ -214,7 +306,7 @@ describe('accounts', () => {
 					(err, res) => {
 						expect(err).to.not.exist;
 						expect(res).to.have.length(10);
-						for (var i = 0; i < limit - 1; i++) {
+						for (let i = 0; i < limit - 1; i++) {
 							expect(
 								new Bignum(res[i].balance).gte(new Bignum(res[i + 1].balance))
 							).to.equal(true);
@@ -225,9 +317,9 @@ describe('accounts', () => {
 			});
 
 			it('should return accounts in the range 10 to 20 ordered by descending balance', done => {
-				var limit = 10;
-				var offset = 10;
-				var sort = 'balance:desc';
+				const limit = 10;
+				const offset = 10;
+				const sort = 'balance:desc';
 
 				accounts.shared.getAccounts(
 					{
@@ -238,7 +330,7 @@ describe('accounts', () => {
 					(err, res) => {
 						expect(err).to.not.exist;
 						expect(res).to.have.length(10);
-						for (var i = 0; i < limit - 1; i++) {
+						for (let i = 0; i < limit - 1; i++) {
 							expect(
 								new Bignum(res[i].balance).gte(new Bignum(res[i + 1].balance))
 							).to.equal(true);

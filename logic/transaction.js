@@ -15,7 +15,6 @@
 'use strict';
 
 const crypto = require('crypto');
-const extend = require('extend');
 const ByteBuffer = require('bytebuffer');
 const _ = require('lodash');
 const Bignum = require('../helpers/bignum.js');
@@ -33,7 +32,6 @@ const __private = {};
  * @see Parent: {@link logic}
  * @requires bytebuffer
  * @requires crypto
- * @requires extend
  * @requires lodash
  * @requires helpers/bignum
  * @requires helpers/slots
@@ -150,7 +148,7 @@ class Transaction {
 	 * @returns {!Array} Contents as an ArrayBuffer
 	 * @todo Add description for the params
 	 */
-	/* eslint-disable class-methods-use-this */
+
 	getBytes(transaction, skipSignature, skipSecondSignature) {
 		if (!__private.types[transaction.type]) {
 			throw `Unknown transaction type ${transaction.type}`;
@@ -257,6 +255,7 @@ class Transaction {
 
 		return __private.types[transaction.type].ready(transaction, sender);
 	}
+	/* eslint-enable class-methods-use-this */
 
 	/**
 	 * Counts transactions from `trs` table by id.
@@ -279,7 +278,8 @@ class Transaction {
 	/**
 	 * Returns true if a transaction was confirmed.
 	 *
-	 * @param {transaction} transaction
+	 * @param {Object} transaction
+	 * @param {string} transaction.id - only transaction id is necessary here
 	 * @param {function} cb
 	 * @returns {SetImmediate} error, isConfirmed
 	 * @todo Add description for the params
@@ -288,7 +288,7 @@ class Transaction {
 		if (!transaction || !transaction.id) {
 			return setImmediate(cb, 'Invalid transaction id', false);
 		}
-		this.countById(transaction, (err, count) => {
+		return this.countById(transaction, (err, count) => {
 			if (err) {
 				return setImmediate(cb, err, false);
 			} else if (count > 0) {
@@ -374,14 +374,14 @@ class Transaction {
 		transaction.senderId = sender.address;
 
 		// Call process on transaction type
-		__private.types[transaction.type].process(
+		return __private.types[transaction.type].process(
 			transaction,
 			sender,
-			(err, transaction) => {
+			(err, processedTransaction) => {
 				if (err) {
 					return setImmediate(cb, err);
 				}
-				return setImmediate(cb, null, transaction);
+				return setImmediate(cb, null, processedTransaction);
 			},
 			tx
 		);
@@ -473,7 +473,7 @@ class Transaction {
 				sender.publicKey,
 			].join(' ');
 
-			if (exceptions.senderPublicKey.indexOf(transaction.id) > -1) {
+			if (exceptions.senderPublicKey.includes(transaction.id)) {
 				this.scope.logger.error(err);
 				this.scope.logger.debug(JSON.stringify(transaction));
 			} else {
@@ -502,6 +502,7 @@ class Transaction {
 
 		// Determine multisignatures from sender or transaction asset
 		const multisignatures = sender.multisignatures || [];
+
 		if (multisignatures.length === 0) {
 			if (
 				transaction.asset &&
@@ -540,7 +541,7 @@ class Transaction {
 		if (!valid) {
 			err = 'Failed to verify signature';
 
-			if (exceptions.signatures.indexOf(transaction.id) > -1) {
+			if (exceptions.signatures.includes(transaction.id)) {
 				this.scope.logger.error(err);
 				this.scope.logger.debug(JSON.stringify(transaction));
 				valid = true;
@@ -585,33 +586,61 @@ class Transaction {
 			}
 		}
 
-		// Verify multisignatures
+		// Verify signatures of multisignatures transactions
 		if (transaction.signatures) {
-			for (let d = 0; d < transaction.signatures.length; d++) {
-				valid = false;
+			let isValidSignature;
+			const keygroup = multisignatures;
+			const checked = [];
 
-				for (let s = 0; s < multisignatures.length; s++) {
-					if (
-						transaction.requesterPublicKey &&
-						multisignatures[s] === transaction.requesterPublicKey
-					) {
-						continue; // eslint-disable-line no-continue
+			try {
+				// Iterate over signatures
+				for (let s = 0; s < transaction.signatures.length; s++) {
+					// Mark currently checked signature as invalid
+					isValidSignature = false;
+
+					// Iterate over public keys in keygroup, check if signature is valid for
+					for (let k = 0; k < keygroup.length; k++) {
+						if (
+							!checked.includes(keygroup[k]) &&
+							this.verifySignature(
+								transaction,
+								keygroup[k],
+								transaction.signatures[s]
+							)
+						) {
+							// If signature is valid for particular public key - add it to checked array
+							checked.push(keygroup[k]);
+							isValidSignature = true;
+							break;
+						}
 					}
 
-					if (
-						this.verifySignature(
-							transaction,
-							multisignatures[s],
-							transaction.signatures[d]
-						)
-					) {
-						valid = true;
+					if (!isValidSignature) {
+						const invalidSignatureErr = `Failed to verify multisignature: ${
+							transaction.signatures[s]
+						}`;
+
+						// Check against exceptions
+						if (
+							exceptions.duplicatedSignatures[transaction.id] &&
+							exceptions.duplicatedSignatures[transaction.id].includes(
+								transaction.signatures[s]
+							)
+						) {
+							this.scope.logger.warn('Transaction accepted due to exceptions', {
+								invalidSignatureErr,
+								transaction: JSON.stringify(transaction),
+							});
+						} else {
+							return setImmediate(cb, invalidSignatureErr);
+						}
 					}
 				}
-
-				if (!valid) {
-					return setImmediate(cb, 'Failed to verify multisignature');
-				}
+			} catch (e) {
+				return setImmediate(
+					cb,
+					`Failed to verify multisignature: ${e.toString()}`
+				);
 			}
 		}
 
@@ -667,42 +696,53 @@ class Transaction {
 		}
 
 		const verifyTransactionTypes = (
-			transaction,
-			sender,
-			tx,
+			transactionToVeryfi,
+			senderToVerify,
+			txToVerify,
 			verifyTransactionTypesCb
 		) => {
-			__private.types[transaction.type].verify(
-				transaction,
-				sender,
-				err => {
-					if (err) {
-						return setImmediate(verifyTransactionTypesCb, err);
+			__private.types[transactionToVeryfi.type].verify(
+				transactionToVeryfi,
+				senderToVerify,
+				verifyErr => {
+					if (verifyErr) {
+						return setImmediate(verifyTransactionTypesCb, verifyErr);
 					}
 					return setImmediate(verifyTransactionTypesCb);
 				},
-				tx
+				txToVerify
 			);
 		};
 
-		if (checkExists) {
-			this.checkConfirmed(transaction, (checkConfirmedErr, isConfirmed) => {
-				if (checkConfirmedErr) {
-					return setImmediate(cb, checkConfirmedErr);
-				}
-
-				if (isConfirmed) {
-					return setImmediate(
-						cb,
-						`Transaction is already confirmed: ${transaction.id}`
-					);
-				}
-
-				verifyTransactionTypes(transaction, sender, tx, cb);
-			});
-		} else {
-			verifyTransactionTypes(transaction, sender, tx, cb);
+		// Sanitize ready property
+		transaction.ready = this.ready(transaction, sender);
+		// Sanitize signatures property
+		if (sender.multisignatures) {
+			transaction.signatures = Array.isArray(transaction.signatures)
+				? transaction.signatures
+				: [];
 		}
+
+		if (checkExists) {
+			return this.checkConfirmed(
+				transaction,
+				(checkConfirmedErr, isConfirmed) => {
+					if (checkConfirmedErr) {
+						return setImmediate(cb, checkConfirmedErr);
+					}
+
+					if (isConfirmed) {
+						return setImmediate(
+							cb,
+							`Transaction is already confirmed: ${transaction.id}`
+						);
+					}
+
+					return verifyTransactionTypes(transaction, sender, tx, cb);
+				}
+			);
+		}
+		return verifyTransactionTypes(transaction, sender, tx, cb);
 	}
 
 	/**
@@ -837,13 +877,13 @@ class Transaction {
 			round: slots.calcRound(block.height),
 		});
 
-		this.scope.account.merge(
+		return this.scope.account.merge(
 			sender.address,
 			{
 				balance: `-${amount}`,
 				round: slots.calcRound(block.height),
 			},
-			(mergeErr, sender) => {
+			(mergeErr, mergedSender) => {
 				if (mergeErr) {
 					return setImmediate(cb, mergeErr);
 				}
@@ -851,14 +891,14 @@ class Transaction {
 				 * Calls applyConfirmed for Transfer, Signature, Delegate, Vote, Multisignature,
 				 * DApp, InTransfer or OutTransfer.
 				 */
-				__private.types[transaction.type].applyConfirmed(
+				return __private.types[transaction.type].applyConfirmed(
 					transaction,
 					block,
-					sender,
+					mergedSender,
 					applyConfirmedErr => {
 						if (applyConfirmedErr) {
-							this.scope.account.merge(
-								sender.address,
+							return this.scope.account.merge(
+								mergedSender.address,
 								{
 									balance: amount,
 									round: slots.calcRound(block.height),
@@ -867,9 +907,8 @@ class Transaction {
 									setImmediate(cb, reverseMergeErr || applyConfirmedErr),
 								tx
 							);
-						} else {
-							return setImmediate(cb);
 						}
+						return setImmediate(cb);
 					},
 					tx
 				);
@@ -905,25 +944,25 @@ class Transaction {
 			round: slots.calcRound(block.height),
 		});
 
-		this.scope.account.merge(
+		return this.scope.account.merge(
 			sender.address,
 			{
 				balance: amount,
 				round: slots.calcRound(block.height),
 			},
-			(mergeErr, sender) => {
+			(mergeErr, mergedSender) => {
 				if (mergeErr) {
 					return setImmediate(cb, mergeErr);
 				}
 
-				__private.types[transaction.type].undoConfirmed(
+				return __private.types[transaction.type].undoConfirmed(
 					transaction,
 					block,
-					sender,
+					mergedSender,
 					undoConfirmedErr => {
 						if (undoConfirmedErr) {
-							this.scope.account.merge(
-								sender.address,
+							return this.scope.account.merge(
+								mergedSender.address,
 								{
 									balance: `-${amount}`,
 									round: slots.calcRound(block.height),
@@ -932,9 +971,8 @@ class Transaction {
 									setImmediate(cb, reverseMergeErr || undoConfirmedErr),
 								tx
 							);
-						} else {
-							return setImmediate(cb);
 						}
+						return setImmediate(cb);
 					},
 					tx
 				);
@@ -985,29 +1023,28 @@ class Transaction {
 			return setImmediate(cb, senderBalance.error);
 		}
 
-		this.scope.account.merge(
+		return this.scope.account.merge(
 			sender.address,
 			{ u_balance: `-${amount}` },
-			(mergeErr, sender) => {
+			(mergeErr, mergedSender) => {
 				if (mergeErr) {
 					return setImmediate(cb, mergeErr);
 				}
 
-				__private.types[transaction.type].applyUnconfirmed(
+				return __private.types[transaction.type].applyUnconfirmed(
 					transaction,
-					sender,
+					mergedSender,
 					applyUnconfirmedErr => {
 						if (applyUnconfirmedErr) {
-							this.scope.account.merge(
-								sender.address,
+							return this.scope.account.merge(
+								mergedSender.address,
 								{ u_balance: amount },
 								reverseMergeErr =>
 									setImmediate(cb, reverseMergeErr || applyUnconfirmedErr),
 								tx
 							);
-						} else {
-							return setImmediate(cb);
 						}
+						return setImmediate(cb);
 					},
 					tx
 				);
@@ -1037,29 +1074,28 @@ class Transaction {
 
 		const amount = transaction.amount.plus(transaction.fee);
 
-		this.scope.account.merge(
+		return this.scope.account.merge(
 			sender.address,
 			{ u_balance: amount },
-			(mergeErr, sender) => {
+			(mergeErr, mergedSender) => {
 				if (mergeErr) {
 					return setImmediate(cb, mergeErr);
 				}
 
-				__private.types[transaction.type].undoUnconfirmed(
+				return __private.types[transaction.type].undoUnconfirmed(
 					transaction,
-					sender,
+					mergedSender,
 					undoUnconfirmedErr => {
 						if (undoUnconfirmedErr) {
-							this.scope.account.merge(
-								sender.address,
+							return this.scope.account.merge(
+								mergedSender.address,
 								{ u_balance: `-${amount}` },
 								reverseMergeErr =>
 									setImmediate(cb, reverseMergeErr || undoUnconfirmedErr),
 								tx
 							);
-						} else {
-							return setImmediate(cb);
 						}
+						return setImmediate(cb);
 					},
 					tx
 				);
@@ -1115,22 +1151,37 @@ class Transaction {
 			}
 		}
 
-		if (transaction.amount) {
-			transaction.amount = new Bignum(transaction.amount);
-		}
+		transaction.amount = new Bignum(transaction.amount || 0);
 
-		if (transaction.fee) {
-			transaction.fee = new Bignum(transaction.fee);
-		}
+		transaction.fee = new Bignum(transaction.fee || 0);
 
 		const report = this.scope.schema.validate(
 			transaction,
 			Transaction.prototype.schema
 		);
 
-		if (!report) {
-			throw `Failed to validate transaction schema: ${this.scope.schema
-				.getLastErrors()
+		let formatErrors = this.scope.schema.getLastErrors() || [];
+
+		formatErrors = formatErrors.filter(error => {
+			if (error.code === 'INVALID_FORMAT' && error.params[0] === 'address') {
+				// Remove the errors if transaction is in exception
+				// and recipient equals the recipient fixed in the exception
+				if (
+					(exceptions.recipientLeadingZero[transaction.id] &&
+						exceptions.recipientLeadingZero[transaction.id] ===
+							error.params[1]) ||
+					(exceptions.recipientExceedingUint64[transaction.id] &&
+						exceptions.recipientExceedingUint64[transaction.id] ===
+							error.params[1])
+				) {
+					return false;
+				}
+			}
+			return true;
+		});
+
+		if (!report && formatErrors.length) {
+			throw `Failed to validate transaction schema: ${formatErrors
 				.map(err => err.message)
 				.join(', ')}`;
 		}
@@ -1155,6 +1206,7 @@ class Transaction {
 	 * @returns {null|transaction}
 	 * @todo Add description for the params
 	 */
+
 	/* eslint-disable class-methods-use-this */
 	dbRead(raw) {
 		if (!raw.t_id) {
@@ -1188,11 +1240,12 @@ class Transaction {
 		const asset = __private.types[transaction.type].dbRead(raw);
 
 		if (asset) {
-			transaction.asset = extend(transaction.asset, asset);
+			transaction.asset = Object.assign(transaction.asset, asset);
 		}
 
 		return transaction;
 	}
+	/* eslint-enable class-methods-use-this */
 }
 
 // TODO: The below functions should be converted into static functions,
